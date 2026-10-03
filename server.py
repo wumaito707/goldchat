@@ -26,6 +26,7 @@ import sms_config
 import email_config
 import cloud_database
 import cloud_media
+import push_notifications
 import logging
 import re
 
@@ -113,6 +114,7 @@ def init_db():
     features.init_schema(conn)
     social.init_schema(conn)
     account_security.init_schema(conn)
+    push_notifications.init_schema(conn)
     conn.commit()
     conn.close()
 
@@ -583,6 +585,7 @@ async def ws_endpoint(websocket: WebSocket, token: str = Query("")):
         mgr.disconnect(ws_id)
 
 FEATURE_HOOKS = features.install(app, globals())
+PUSH_MESSAGE = push_notifications.install(app, globals())
 SOCIAL_HOOKS = social.install(app, globals(),FEATURE_HOOKS)
 consume_registration = account_security.install(app, globals())
 

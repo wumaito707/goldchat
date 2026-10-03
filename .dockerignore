@@ -21,3 +21,5 @@ tests
 .cloud-config.json*
 
 android-signing-private/
+
+.push-config.json*

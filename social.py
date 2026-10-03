@@ -109,11 +109,15 @@ def install(app,b,hooks):
     def alert(conn,user,kind,title,body,cid=None,mid=None):
         conn.execute('INSERT INTO notifications(user_id,kind,title,body,chat_id,message_id,created_at) VALUES(?,?,?,?,?,?,?)',(user,kind,title,body,cid,mid,b['now_iso']()))
     def notify_message(mid):
+        recipients=[]
         with db() as conn:
             m=conn.execute('SELECT m.*,u.display_name FROM messages m JOIN users u ON u.id=m.sender_id WHERE m.id=?',(mid,)).fetchone()
             if not m:return
             for member in conn.execute('SELECT user_id FROM chat_members WHERE chat_id=? AND user_id!=?',(m['chat_id'],m['sender_id'])):
                 alert(conn,member[0],'message',m['display_name'],m['text'][:180] or 'New attachment',m['chat_id'],mid)
+                recipients.append(member[0])
+        for recipient in recipients:
+            if b.get('PUSH_MESSAGE'):b['PUSH_MESSAGE'](recipient,m['chat_id'])
     def call_row(call_id,user):
         with db() as conn:row=conn.execute('SELECT * FROM call_history WHERE id=?',(call_id,)).fetchone()
         if not row or user not in (row['caller_id'],row['callee_id']):raise HTTPException(404,'Call not found')

@@ -72,6 +72,10 @@ class MessageIn(BaseModel):
     reply_to: int | None = None
     attachment_id: int | None = None
 
+class PhoneContactsIn(BaseModel):
+    emails:list[str]=Field(default_factory=list,max_length=100)
+    phones:list[str]=Field(default_factory=list,max_length=100)
+
 class UploadIn(BaseModel):
     mime: str = ""
     name: str = Field(min_length=1, max_length=255)
@@ -326,6 +330,20 @@ def install(app, b):
         for cid in cids: await changed(cid)
         await manager.send_to_user(uid,{'type':'profile_changed'})
         return profile(row)
+
+    @app.post('/api/contacts/match-phone')
+    def match_phone_contacts(body:PhoneContactsIn,token:str=Depends(b["session_token"])):
+        uid=user(token)
+        emails=list({address.strip().lower() for address in body.emails if len(address)<255})
+        phones=list({number.strip() for number in body.phones if len(number)<32})
+        clauses=[];args=[]
+        for column,values in [('verified_email',emails),('verified_phone',phones)]:
+            if values:clauses.append('LOWER('+column+') IN ('+','.join('?' for _ in values)+')');args.extend(values)
+        if not clauses:return []
+        with connection() as conn:
+            rows=conn.execute('SELECT u.* FROM users u WHERE u.id!=? AND ('+' OR '.join(clauses)+') AND NOT EXISTS(SELECT 1 FROM blocks WHERE (user_id=? AND blocked_id=u.id) OR (user_id=u.id AND blocked_id=?))',[uid,*args,uid,uid]).fetchall()
+            result=[public(row) for row in rows]
+        conn.close();return result
 
     @app.get('/api/contacts')
     def contacts(token:str=Depends(b["session_token"])):
