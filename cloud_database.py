@@ -73,6 +73,27 @@ class Connection:
         if command=='BEGIN':self.in_transaction=True
         elif command in {'COMMIT','ROLLBACK'}:self.in_transaction=False
         return result
+    def execute_batch(self, statements):
+        if self.closed or self.in_transaction:raise sqlite3.ProgrammingError('Batch requires an open connection without a transaction')
+        commands=[('BEGIN IMMEDIATE',()),*statements,('COMMIT',())]
+        steps=[]
+        for i,(sql,args) in enumerate(commands):
+            step={'stmt':{'sql':sql,'args':[encode(v) for v in args]}}
+            if i:step['condition']={'type':'ok','step':i-1}
+            steps.append(step)
+        steps.append({'condition':{'type':'not','cond':{'type':'ok','step':len(commands)-1}},'stmt':{'sql':'ROLLBACK'}})
+        body={'requests':[{'type':'batch','batch':{'steps':steps}}]}
+        if self.baton:body['baton']=self.baton
+        self.in_transaction=True
+        response=post_pipeline(self.base_url+'/v2/pipeline',self.token,body)
+        self.baton=response.get('baton')
+        item=response['results'][0]
+        if item['type']=='error':raise sqlite3.OperationalError('Cloud database batch request failed')
+        result=item['response']['result']
+        self.in_transaction=False
+        errors=[v for v in result['step_errors'] if v]
+        if errors:raise sqlite3.OperationalError('Cloud database batch failed: '+errors[0].get('code',''))
+
     def cursor(self):return Cursor(self)
     def execute(self,sql,args=()):return self.cursor().execute(sql,args)
     def executemany(self,sql,rows):

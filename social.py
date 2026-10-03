@@ -32,18 +32,22 @@ def cleanup_expired(conn):
         return
     now=time.time()
     expired=[r[0] for r in conn.execute('SELECT id FROM messages WHERE expires_at IS NOT NULL AND expires_at<=?',(now,))]
+    statements=[]
     if expired:
         marks=','.join('?' for _ in expired)
         for table,col in [('reactions','message_id'),('stars','message_id'),('message_pins','message_id'),('notifications','message_id'),('message_hidden','message_id')]:
-            conn.execute(f'DELETE FROM {table} WHERE {col} IN ({marks})',expired)
-        conn.execute(f'UPDATE messages SET reply_to=NULL WHERE reply_to IN ({marks})',expired)
-        conn.execute(f'DELETE FROM messages WHERE id IN ({marks})',expired)
-    conn.execute('DELETE FROM statuses WHERE expires_at<=?',(now,))
-    conn.execute('DELETE FROM device_links WHERE expires_at<=?',(now,))
+            statements.append((f'DELETE FROM {table} WHERE {col} IN ({marks})',expired))
+        statements.append((f'UPDATE messages SET reply_to=NULL WHERE reply_to IN ({marks})',expired))
+        statements.append((f'DELETE FROM messages WHERE id IN ({marks})',expired))
+    statements.extend([('DELETE FROM statuses WHERE expires_at<=?',(now,)),('DELETE FROM device_links WHERE expires_at<=?',(now,))])
     for row in conn.execute("SELECT h.*,u.display_name FROM call_history h JOIN users u ON u.id=h.caller_id WHERE h.status='ringing' AND h.created_at<?",(now-90,)).fetchall():
-        conn.execute("UPDATE call_history SET status='missed',ended_at=? WHERE id=?",(now,row['id']))
-        conn.execute("INSERT INTO notifications(user_id,kind,title,body,chat_id,created_at) VALUES(?,?,?,?,?,?)",(row['callee_id'],'call','Missed call',row['display_name']+' called',row['chat_id'],datetime.fromtimestamp(now,timezone.utc).isoformat()))
-    conn.commit()
+        statements.append(("UPDATE call_history SET status='missed',ended_at=? WHERE id=?",(now,row['id'])))
+        statements.append(("INSERT INTO notifications(user_id,kind,title,body,chat_id,created_at) VALUES(?,?,?,?,?,?)",(row['callee_id'],'call','Missed call',row['display_name']+' called',row['chat_id'],datetime.fromtimestamp(now,timezone.utc).isoformat())))
+    if hasattr(conn,'execute_batch'):conn.execute_batch(statements)
+    else:
+        for sql,args in statements:conn.execute(sql,args)
+        conn.commit()
+
 
 def expiry_for(conn,cid):
     timer=conn.execute('SELECT disappearing_seconds FROM chats WHERE id=?',(cid,)).fetchone()
