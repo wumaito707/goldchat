@@ -225,21 +225,27 @@ def user_public(row):
 
 def get_or_create_direct_chat(user_a, user_b):
     conn = get_db()
-    existing = conn.execute("""
-        SELECT c.id FROM chats c
-        WHERE c.type='direct' AND c.id IN (
-            SELECT chat_id FROM chat_members WHERE user_id=?
-        ) AND c.id IN (
-            SELECT chat_id FROM chat_members WHERE user_id=?
-        ) AND (SELECT COUNT(*) FROM chat_members WHERE chat_id=c.id)=2
-    """, (user_a, user_b)).fetchone()
-    if existing:
-        cid = existing["id"]; conn.close(); return cid
-    c = conn.execute("INSERT INTO chats (type, created_at) VALUES ('direct', ?)", (now_iso(),))
-    cid = c.lastrowid
-    conn.executemany("INSERT INTO chat_members (chat_id, user_id, joined_at) VALUES (?,?,?)",
-                     [(cid, user_a, now_iso()), (cid, user_b, now_iso())])
-    conn.commit(); conn.close(); return cid
+    match = """SELECT c.id FROM chats c WHERE c.type='direct'
+        AND EXISTS(SELECT 1 FROM chat_members WHERE chat_id=c.id AND user_id=?)
+        AND EXISTS(SELECT 1 FROM chat_members WHERE chat_id=c.id AND user_id=?)
+        AND (SELECT COUNT(*) FROM chat_members WHERE chat_id=c.id)=2"""
+    # Both writes run under one lock, including the existence check. Only a
+    # newly inserted chat receives members; existing histories stay intact.
+    statements = [
+        ("INSERT INTO chats(type,created_at) SELECT 'direct',? WHERE NOT EXISTS("+match+")", (now_iso(),user_a,user_b)),
+        ("WITH new_chat AS MATERIALIZED (SELECT last_insert_rowid() AS id WHERE changes()>0) INSERT INTO chat_members(chat_id,user_id,joined_at) SELECT new_chat.id,user_id,? FROM new_chat CROSS JOIN (SELECT ? AS user_id UNION ALL SELECT ?)",(now_iso(),user_a,user_b)),
+    ]
+    try:
+        if hasattr(conn,'execute_batch'):
+            conn.execute_batch(statements)
+        else:
+            conn.execute('BEGIN IMMEDIATE')
+            for sql,args in statements:conn.execute(sql,args)
+            conn.commit()
+        row=conn.execute(match+" ORDER BY c.id LIMIT 1",(user_a,user_b)).fetchone()
+        return row['id']
+    finally:
+        conn.close()
 
 def chat_list_for(user_id):
     conn = get_db()
