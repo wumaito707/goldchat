@@ -156,13 +156,21 @@ def install(app, b):
                 raise HTTPException(403, 'Messaging is blocked for this contact')
         conn.close()
 
-    def detail(row, uid, conn):
-        sender = conn.execute('SELECT * FROM users WHERE id=?', (row['sender_id'],)).fetchone()
-        reacts = conn.execute('SELECT emoji,COUNT(*) AS count FROM reactions WHERE message_id=? GROUP BY emoji', (row['id'],)).fetchall()
-        starred = bool(conn.execute('SELECT 1 FROM stars WHERE message_id=? AND user_id=?', (row['id'],uid)).fetchone())
-        attachment = conn.execute('SELECT id,name,mime,size FROM attachments WHERE id=?', (row['attachment_id'],)).fetchone() if row['attachment_id'] and not row['deleted'] else None
-        reply = conn.execute('SELECT id,text,deleted FROM messages WHERE id=?', (row['reply_to'],)).fetchone() if row['reply_to'] else None
-        read = conn.execute('SELECT MIN(COALESCE(rs.last_read_msg_id,0)) AS n FROM chat_members cm LEFT JOIN read_state rs ON rs.chat_id=cm.chat_id AND rs.user_id=cm.user_id WHERE cm.chat_id=? AND cm.user_id!=?', (row['chat_id'],uid)).fetchone()['n']
+    def detail(row, uid, conn, cached=None):
+        if cached is None:
+            sender = conn.execute('SELECT * FROM users WHERE id=?', (row['sender_id'],)).fetchone()
+            reacts = conn.execute('SELECT emoji,COUNT(*) AS count FROM reactions WHERE message_id=? GROUP BY emoji', (row['id'],)).fetchall()
+            starred = bool(conn.execute('SELECT 1 FROM stars WHERE message_id=? AND user_id=?', (row['id'],uid)).fetchone())
+            attachment = conn.execute('SELECT id,name,mime,size FROM attachments WHERE id=?', (row['attachment_id'],)).fetchone() if row['attachment_id'] and not row['deleted'] else None
+            reply = conn.execute('SELECT id,text,deleted FROM messages WHERE id=?', (row['reply_to'],)).fetchone() if row['reply_to'] else None
+            read = conn.execute('SELECT MIN(COALESCE(rs.last_read_msg_id,0)) AS n FROM chat_members cm LEFT JOIN read_state rs ON rs.chat_id=cm.chat_id AND rs.user_id=cm.user_id WHERE cm.chat_id=? AND cm.user_id!=?', (row['chat_id'],uid)).fetchone()['n']
+        else:
+            sender=cached['senders'][row['sender_id']]
+            reacts=cached['reactions'].get(row['id'],[])
+            starred=row['id'] in cached['stars']
+            attachment=cached['attachments'].get(row['attachment_id']) if not row['deleted'] else None
+            reply=cached['replies'].get(row['reply_to'])
+            read=cached['read']
         return {'id':row['id'], 'chat_id':row['chat_id'], 'sender':public(sender), 'text':'Message deleted' if row['deleted'] else row['text'],
             'time':b['fmt_time'](row['created_at']), 'iso':row['created_at'], 'mine':row['sender_id']==uid, 'read':bool(read and read>=row['id']),
             'expires_at':row['expires_at'], 'forwarded':bool(row['forwarded']), 'edited':bool(row['edited_at']), 'deleted':bool(row['deleted']), 'attachment':dict(attachment) if attachment else None,
@@ -181,12 +189,12 @@ def install(app, b):
         uid=user(token)
         results=b['chat_list_for'](uid)
         with connection() as conn:
+            preferences={r['id']:r for r in conn.execute('SELECT c.id,c.owner_id,c.disappearing_seconds,p.pinned,p.archived,p.muted FROM chats c JOIN chat_members cm ON cm.chat_id=c.id LEFT JOIN chat_preferences p ON p.chat_id=c.id AND p.user_id=cm.user_id WHERE cm.user_id=?',(uid,))}
             for chat in results:
-                pref=conn.execute('SELECT pinned,archived,muted FROM chat_preferences WHERE chat_id=? AND user_id=?',(chat['id'],uid)).fetchone()
-                owner=conn.execute('SELECT owner_id FROM chats WHERE id=?',(chat['id'],)).fetchone()['owner_id']
-                chat.update(dict(pref) if pref else {'pinned':0,'archived':0,'muted':0})
-                chat['owner_id']=owner
-                chat['disappearing_seconds']=conn.execute('SELECT disappearing_seconds FROM chats WHERE id=?',(chat['id'],)).fetchone()[0]
+                pref=preferences[chat['id']]
+                chat.update({k:pref[k] or 0 for k in ['pinned','archived','muted']})
+                chat['owner_id']=pref['owner_id']
+                chat['disappearing_seconds']=pref['disappearing_seconds']
                 if chat['type']!='direct':
                     chat['peer']=None
                     chat['peer_online']=False
@@ -197,8 +205,23 @@ def install(app, b):
     def messages(cid: int, token: str = Depends(b["session_token"]), q: str = '', before: int | None = None):
         uid=user(token); member(cid,uid)
         with connection() as conn:
-            rows=conn.execute('SELECT * FROM messages WHERE chat_id=? AND NOT EXISTS(SELECT 1 FROM message_hidden h WHERE h.message_id=messages.id AND h.user_id=?) AND (? IS NULL OR id<?) AND (?="" OR (deleted=0 AND text LIKE ?)) ORDER BY id DESC LIMIT 200', (cid,uid,before,before,q,'%'+q+'%')).fetchall()
-            result=[detail(r,uid,conn) for r in reversed(rows)]
+            rows=conn.execute('SELECT * FROM messages WHERE chat_id=? AND NOT EXISTS(SELECT 1 FROM message_hidden h WHERE h.message_id=messages.id AND h.user_id=?) AND (? IS NULL OR id<?) AND (?="" OR (deleted=0 AND text LIKE ?)) ORDER BY id DESC LIMIT 50', (cid,uid,before,before,q,'%'+q+'%')).fetchall()
+            def related(table,column,ids,select='*',extra='',args=()):
+                ids=list(set(v for v in ids if v is not None))
+                if not ids:return []
+                marks=','.join('?' for _ in ids)
+                return conn.execute(f'SELECT {select} FROM {table} WHERE {column} IN ({marks}) {extra}',tuple(ids)+tuple(args)).fetchall()
+            reactions={}
+            for r in related('reactions','message_id',[r['id'] for r in rows],'message_id,emoji,COUNT(*) AS count','GROUP BY message_id,emoji'):
+                reactions.setdefault(r['message_id'],[]).append({'emoji':r['emoji'],'count':r['count']})
+            cached={
+                'senders':{r['id']:r for r in related('users','id',[r['sender_id'] for r in rows])},
+                'attachments':{r['id']:r for r in related('attachments','id',[r['attachment_id'] for r in rows if not r['deleted']],'id,name,mime,size')},
+                'replies':{r['id']:r for r in related('messages','id',[r['reply_to'] for r in rows],'id,text,deleted')},
+                'stars':{r['message_id'] for r in related('stars','message_id',[r['id'] for r in rows],'message_id','AND user_id=?',(uid,))},
+                'reactions':reactions,
+                'read':conn.execute('SELECT MIN(COALESCE(rs.last_read_msg_id,0)) AS n FROM chat_members cm LEFT JOIN read_state rs ON rs.chat_id=cm.chat_id AND rs.user_id=cm.user_id WHERE cm.chat_id=? AND cm.user_id!=?',(cid,uid)).fetchone()['n']}
+            result=[detail(r,uid,conn,cached) for r in reversed(rows)]
         conn.close()
         return result
 

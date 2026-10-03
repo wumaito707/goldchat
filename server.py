@@ -245,19 +245,19 @@ def chat_list_for(user_id):
         WHERE cm.user_id=?
         ORDER BY (SELECT MAX(created_at) FROM messages m WHERE m.chat_id=c.id) DESC
     """, (user_id,)).fetchall()
+    memberships={}
+    for m in conn.execute('SELECT cm.chat_id,u.* FROM chat_members cm JOIN users u ON u.id=cm.user_id WHERE cm.user_id!=? AND cm.chat_id IN (SELECT chat_id FROM chat_members WHERE user_id=?)',(user_id,user_id)):
+        memberships.setdefault(m['chat_id'],[]).append(m)
+    last_messages={r['chat_id']:r for r in conn.execute('SELECT m.* FROM messages m WHERE m.id=(SELECT MAX(m2.id) FROM messages m2 WHERE m2.chat_id=m.chat_id AND NOT EXISTS(SELECT 1 FROM message_hidden h WHERE h.message_id=m2.id AND h.user_id=?)) AND m.chat_id IN (SELECT chat_id FROM chat_members WHERE user_id=?)',(user_id,user_id))}
+    unread_counts={r['chat_id']:r['n'] for r in conn.execute('SELECT m.chat_id,COUNT(*) AS n FROM messages m JOIN chat_members cm ON cm.chat_id=m.chat_id AND cm.user_id=? LEFT JOIN read_state rs ON rs.chat_id=m.chat_id AND rs.user_id=? WHERE m.sender_id!=? AND m.id>COALESCE(rs.last_read_msg_id,0) GROUP BY m.chat_id',(user_id,user_id,user_id))}
+    peer_reads={r['chat_id']:r['n'] for r in conn.execute('SELECT cm.chat_id,MIN(COALESCE(rs.last_read_msg_id,0)) AS n FROM chat_members cm LEFT JOIN read_state rs ON rs.chat_id=cm.chat_id AND rs.user_id=cm.user_id WHERE cm.user_id!=? AND cm.chat_id IN (SELECT chat_id FROM chat_members WHERE user_id=?) GROUP BY cm.chat_id',(user_id,user_id))}
     out = []
     for r in rows:
-        members = conn.execute("""
-            SELECT u.id, u.username, u.display_name, u.avatar_initial, u.avatar_media_id, u.verified_at
-            FROM chat_members cm JOIN users u ON u.id=cm.user_id
-            WHERE cm.chat_id=? AND cm.user_id!=?
-        """, (r["id"], user_id)).fetchall()
-        last = conn.execute("SELECT * FROM messages WHERE chat_id=? AND NOT EXISTS(SELECT 1 FROM message_hidden h WHERE h.message_id=messages.id AND h.user_id=?) ORDER BY id DESC LIMIT 1", (r["id"],user_id)).fetchone()
-        rs = conn.execute("SELECT last_read_msg_id FROM read_state WHERE chat_id=? AND user_id=?", (r["id"], user_id)).fetchone()
-        last_read = rs["last_read_msg_id"] if rs else 0
-        unread = conn.execute("SELECT COUNT(*) AS n FROM messages WHERE chat_id=? AND sender_id!=? AND id>?", (r["id"], user_id, last_read)).fetchone()["n"]
-        peer = members[0] if members else None
-        peer_read = conn.execute("SELECT MIN(COALESCE(rs.last_read_msg_id,0)) FROM chat_members cm LEFT JOIN read_state rs ON rs.chat_id=cm.chat_id AND rs.user_id=cm.user_id WHERE cm.chat_id=? AND cm.user_id!=?",(r['id'],user_id)).fetchone()[0]
+        members=memberships.get(r['id'],[])
+        last=last_messages.get(r['id'])
+        unread=unread_counts.get(r['id'],0)
+        peer=members[0] if members else None
+        peer_read=peer_reads.get(r['id'])
         out.append({
             "id": r["id"], "type": r["type"], "title": r["title"],
             "peer": user_public(peer) if peer else None,
