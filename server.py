@@ -584,6 +584,10 @@ def root():
 def service_worker():
     return FileResponse(STATIC_DIR / "service-worker.js", media_type="application/javascript", headers={"Cache-Control":"no-cache","Service-Worker-Allowed":"/"})
 
+@app.get("/.well-known/assetlinks.json")
+def android_assetlinks():
+    return FileResponse(STATIC_DIR / "assetlinks.json", media_type="application/json")
+
 @app.get("/healthz")
 def health():
     return {"ok": True}

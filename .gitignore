@@ -20,3 +20,5 @@ data/
 *.log
 
 .cloud-config.json*
+
+android-signing-private/

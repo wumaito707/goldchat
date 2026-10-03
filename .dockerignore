@@ -19,3 +19,5 @@ tests
 *.log
 
 .cloud-config.json*
+
+android-signing-private/
