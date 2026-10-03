@@ -54,6 +54,11 @@ STATIC_DIR = BASE / "static"
 
 app = FastAPI(title="GoldChat")
 
+@app.exception_handler(sqlite3.OperationalError)
+async def database_error(request: Request, error: sqlite3.OperationalError):
+    logging.getLogger('uvicorn.error').error('Database operation failed: %s', str(error))
+    return JSONResponse(status_code=503, content={'detail':'GOLDCHAT could not reach its database. Please try again shortly.'})
+
 # ---------- DB ----------
 def get_db():
     conn = cloud_database.connect(os.environ['TURSO_DATABASE_URL'],os.environ['TURSO_AUTH_TOKEN']) if os.environ.get('TURSO_DATABASE_URL') else sqlite3.connect(DB_PATH)

@@ -205,7 +205,7 @@ def install(app, b):
     def messages(cid: int, token: str = Depends(b["session_token"]), q: str = '', before: int | None = None):
         uid=user(token); member(cid,uid)
         with connection() as conn:
-            rows=conn.execute('SELECT * FROM messages WHERE chat_id=? AND NOT EXISTS(SELECT 1 FROM message_hidden h WHERE h.message_id=messages.id AND h.user_id=?) AND (? IS NULL OR id<?) AND (?="" OR (deleted=0 AND text LIKE ?)) ORDER BY id DESC LIMIT 50', (cid,uid,before,before,q,'%'+q+'%')).fetchall()
+            rows=conn.execute('SELECT * FROM messages WHERE chat_id=? AND NOT EXISTS(SELECT 1 FROM message_hidden h WHERE h.message_id=messages.id AND h.user_id=?) AND (? IS NULL OR id<?) AND (?=? OR (deleted=0 AND text LIKE ?)) ORDER BY id DESC LIMIT 50', (cid,uid,before,before,q,'','%'+q+'%')).fetchall()
             def related(table,column,ids,select='*',extra='',args=()):
                 ids=list(set(v for v in ids if v is not None))
                 if not ids:return []
@@ -470,7 +470,7 @@ def install(app, b):
         uid=user(token); row=message_row(mid,uid)
         if row['sender_id']!=uid: raise HTTPException(403,'Only your own messages can be deleted')
         with connection() as conn:
-            conn.execute('UPDATE messages SET text="",deleted=1 WHERE id=?',(mid,))
+            conn.execute('UPDATE messages SET text=?,deleted=1 WHERE id=?',('',mid))
             conn.execute('DELETE FROM reactions WHERE message_id=?',(mid,))
             conn.execute('DELETE FROM notifications WHERE message_id=?',(mid,))
         conn.close(); await changed(row['chat_id']); return {'ok':True}
