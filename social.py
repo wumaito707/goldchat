@@ -31,7 +31,10 @@ def cleanup_expired(conn):
     if 'expires_at' not in {r[1] for r in conn.execute('PRAGMA table_info(messages)')}:
         return
     now=time.time()
-    expired=[r[0] for r in conn.execute('SELECT id FROM messages WHERE expires_at IS NOT NULL AND expires_at<=?',(now,))]
+    queries=[('SELECT id FROM messages WHERE expires_at IS NOT NULL AND expires_at<=?',(now,)),('SELECT (SELECT COUNT(*) FROM statuses WHERE expires_at<=?) AS statuses,(SELECT COUNT(*) FROM device_links WHERE expires_at<=?) AS devices',(now,now)),("SELECT h.*,u.display_name FROM call_history h JOIN users u ON u.id=h.caller_id WHERE h.status='ringing' AND h.created_at<?",(now-90,))]
+    data=conn.query_batch(queries) if hasattr(conn,'query_batch') else [conn.execute(sql,args).fetchall() for sql,args in queries]
+    expired=[r[0] for r in data[0]]
+    if not expired and not data[1][0]['statuses'] and not data[1][0]['devices'] and not data[2]:return
     statements=[]
     if expired:
         marks=','.join('?' for _ in expired)
@@ -40,7 +43,7 @@ def cleanup_expired(conn):
         statements.append((f'UPDATE messages SET reply_to=NULL WHERE reply_to IN ({marks})',expired))
         statements.append((f'DELETE FROM messages WHERE id IN ({marks})',expired))
     statements.extend([('DELETE FROM statuses WHERE expires_at<=?',(now,)),('DELETE FROM device_links WHERE expires_at<=?',(now,))])
-    for row in conn.execute("SELECT h.*,u.display_name FROM call_history h JOIN users u ON u.id=h.caller_id WHERE h.status='ringing' AND h.created_at<?",(now-90,)).fetchall():
+    for row in data[2]:
         statements.append(("UPDATE call_history SET status='missed',ended_at=? WHERE id=?",(now,row['id'])))
         statements.append(("INSERT INTO notifications(user_id,kind,title,body,chat_id,created_at) VALUES(?,?,?,?,?,?)",(row['callee_id'],'call','Missed call',row['display_name']+' called',row['chat_id'],datetime.fromtimestamp(now,timezone.utc).isoformat())))
     if hasattr(conn,'execute_batch'):conn.execute_batch(statements)

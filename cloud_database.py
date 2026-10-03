@@ -73,6 +73,18 @@ class Connection:
         if command=='BEGIN':self.in_transaction=True
         elif command in {'COMMIT','ROLLBACK'}:self.in_transaction=False
         return result
+    def query_batch(self, statements):
+        if self.closed:raise sqlite3.ProgrammingError('Connection is closed')
+        body={'requests':[{'type':'execute','stmt':{'sql':sql,'args':[encode(v) for v in args]}} for sql,args in statements]}
+        if self.baton:body['baton']=self.baton
+        response=post_pipeline(self.base_url+'/v2/pipeline',self.token,body);self.baton=response.get('baton')
+        results=[]
+        for item in response['results']:
+            if item['type']=='error':raise sqlite3.OperationalError('Cloud database query failed: '+item.get('error',{}).get('code',''))
+            result=item['response']['result'];columns=[c['name'] for c in result.get('cols',[])]
+            results.append([Row(columns,[decode(v) for v in row]) for row in result.get('rows',[])])
+        return results
+
     def execute_batch(self, statements):
         if self.closed or self.in_transaction:raise sqlite3.ProgrammingError('Batch requires an open connection without a transaction')
         commands=[('BEGIN IMMEDIATE',()),*statements,('COMMIT',())]

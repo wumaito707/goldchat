@@ -243,19 +243,20 @@ def get_or_create_direct_chat(user_a, user_b):
 
 def chat_list_for(user_id):
     conn = get_db()
-    rows = conn.execute("""
-        SELECT c.*, (SELECT COUNT(*) FROM messages m WHERE m.chat_id=c.id) AS msg_count
-        FROM chats c
-        JOIN chat_members cm ON cm.chat_id=c.id
-        WHERE cm.user_id=?
-        ORDER BY (SELECT MAX(created_at) FROM messages m WHERE m.chat_id=c.id) DESC
-    """, (user_id,)).fetchall()
+    queries=[
+        ('\n        SELECT c.*, (SELECT COUNT(*) FROM messages m WHERE m.chat_id=c.id) AS msg_count\n        FROM chats c\n        JOIN chat_members cm ON cm.chat_id=c.id\n        WHERE cm.user_id=?\n        ORDER BY (SELECT MAX(created_at) FROM messages m WHERE m.chat_id=c.id) DESC\n    ',(user_id,)),
+        ('SELECT cm.chat_id,u.* FROM chat_members cm JOIN users u ON u.id=cm.user_id WHERE cm.user_id!=? AND cm.chat_id IN (SELECT chat_id FROM chat_members WHERE user_id=?)',(user_id, user_id)),
+        ('SELECT m.* FROM messages m WHERE m.id=(SELECT MAX(m2.id) FROM messages m2 WHERE m2.chat_id=m.chat_id AND NOT EXISTS(SELECT 1 FROM message_hidden h WHERE h.message_id=m2.id AND h.user_id=?)) AND m.chat_id IN (SELECT chat_id FROM chat_members WHERE user_id=?)',(user_id, user_id)),
+        ('SELECT m.chat_id,COUNT(*) AS n FROM messages m JOIN chat_members cm ON cm.chat_id=m.chat_id AND cm.user_id=? LEFT JOIN read_state rs ON rs.chat_id=m.chat_id AND rs.user_id=? WHERE m.sender_id!=? AND m.id>COALESCE(rs.last_read_msg_id,0) GROUP BY m.chat_id',(user_id, user_id, user_id)),
+        ('SELECT cm.chat_id,MIN(COALESCE(rs.last_read_msg_id,0)) AS n FROM chat_members cm LEFT JOIN read_state rs ON rs.chat_id=cm.chat_id AND rs.user_id=cm.user_id WHERE cm.user_id!=? AND cm.chat_id IN (SELECT chat_id FROM chat_members WHERE user_id=?) GROUP BY cm.chat_id',(user_id, user_id))
+    ]
+    data=conn.query_batch(queries) if hasattr(conn,"query_batch") else [conn.execute(sql,args).fetchall() for sql,args in queries]
+    rows=data[0]
     memberships={}
-    for m in conn.execute('SELECT cm.chat_id,u.* FROM chat_members cm JOIN users u ON u.id=cm.user_id WHERE cm.user_id!=? AND cm.chat_id IN (SELECT chat_id FROM chat_members WHERE user_id=?)',(user_id,user_id)):
-        memberships.setdefault(m['chat_id'],[]).append(m)
-    last_messages={r['chat_id']:r for r in conn.execute('SELECT m.* FROM messages m WHERE m.id=(SELECT MAX(m2.id) FROM messages m2 WHERE m2.chat_id=m.chat_id AND NOT EXISTS(SELECT 1 FROM message_hidden h WHERE h.message_id=m2.id AND h.user_id=?)) AND m.chat_id IN (SELECT chat_id FROM chat_members WHERE user_id=?)',(user_id,user_id))}
-    unread_counts={r['chat_id']:r['n'] for r in conn.execute('SELECT m.chat_id,COUNT(*) AS n FROM messages m JOIN chat_members cm ON cm.chat_id=m.chat_id AND cm.user_id=? LEFT JOIN read_state rs ON rs.chat_id=m.chat_id AND rs.user_id=? WHERE m.sender_id!=? AND m.id>COALESCE(rs.last_read_msg_id,0) GROUP BY m.chat_id',(user_id,user_id,user_id))}
-    peer_reads={r['chat_id']:r['n'] for r in conn.execute('SELECT cm.chat_id,MIN(COALESCE(rs.last_read_msg_id,0)) AS n FROM chat_members cm LEFT JOIN read_state rs ON rs.chat_id=cm.chat_id AND rs.user_id=cm.user_id WHERE cm.user_id!=? AND cm.chat_id IN (SELECT chat_id FROM chat_members WHERE user_id=?) GROUP BY cm.chat_id',(user_id,user_id))}
+    for m in data[1]:memberships.setdefault(m["chat_id"],[]).append(m)
+    last_messages={r["chat_id"]:r for r in data[2]}
+    unread_counts={r["chat_id"]:r["n"] for r in data[3]}
+    peer_reads={r["chat_id"]:r["n"] for r in data[4]}
     out = []
     for r in rows:
         members=memberships.get(r['id'],[])
