@@ -27,6 +27,7 @@ import email_config
 import cloud_database
 import cloud_media
 import push_notifications
+import sponsorship_payments
 import logging
 import re
 
@@ -54,6 +55,7 @@ DB_PATH = DATA_DIR / "goldchat.db"
 STATIC_DIR = BASE / "static"
 
 app = FastAPI(title="GoldChat")
+sponsorship_payments.install(app)
 
 @app.exception_handler(sqlite3.OperationalError)
 async def database_error(request: Request, error: sqlite3.OperationalError):
