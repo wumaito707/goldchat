@@ -147,6 +147,7 @@ def install(app,b):
             statements=[('DELETE FROM verification_sends WHERE created_at<?',(now-86400,)),('DELETE FROM verification_challenges WHERE created_at<?',(now-86400,)),('INSERT INTO verification_sends(id,address,ip,created_at) '+guard,(send_id,address,ip,now,address,now-3600,ip,now-3600,address,now-60))]
             if not existing:
                 statements.append(('INSERT INTO verification_challenges(id,purpose,channel,address,user_id,code_hash,created_at,expires_at,ip,reusable) SELECT ?,?,?,?,?,?,?,?,?,1 WHERE EXISTS(SELECT 1 FROM verification_sends WHERE id=?)',(cid,body.purpose,body.channel,address,user_id,code_hash(cid,code if deliver else secrets.token_hex(32)),now,now+900,ip,send_id)))
+            if existing:statements.append(('UPDATE verification_challenges SET expires_at=? WHERE id=? AND consumed=0 AND EXISTS(SELECT 1 FROM verification_sends WHERE id=?)',(now+900,cid,send_id)))
             atomic(conn,statements)
             if not conn.execute('SELECT 1 FROM verification_sends WHERE id=?',(send_id,)).fetchone():raise HTTPException(429,'Wait 60 seconds before resending. You can still use the code already sent.')
         finally:conn.close()
@@ -155,12 +156,11 @@ def install(app,b):
             except Exception:
                 # Delivery may already have been accepted upstream. Keep this
                 # challenge usable if the email arrives after a timeout.
-                return JSONResponse(status_code=503,content={'detail':'Email delivery could not be confirmed. If your code arrives, enter it here. Otherwise wait 60 seconds and resend.','challenge_id':cid,'expires_in':max(0,int((existing['expires_at'] if existing else now+900)-time.time()))})
-            if not existing:
-                conn=b['get_db']()
-                try:atomic(conn,[('UPDATE verification_challenges SET expires_at=? WHERE id=? AND consumed=0',(time.time()+900,cid))])
-                finally:conn.close()
-        return {'challenge_id':cid,'expires_in':max(0,int((existing['expires_at'] if existing else time.time()+900)-time.time())),'message':'If this address is eligible, a code has been sent. Resending keeps the same code while it is valid.'}
+                return JSONResponse(status_code=503,content={'detail':'Email delivery could not be confirmed. If your code arrives, enter it here. Otherwise wait 60 seconds and resend.','challenge_id':cid,'expires_in':max(0,int((now+900)-time.time()))})
+            conn=b['get_db']()
+            try:atomic(conn,[('UPDATE verification_challenges SET expires_at=? WHERE id=? AND consumed=0',(time.time()+900,cid))])
+            finally:conn.close()
+        return {'challenge_id':cid,'expires_in':900,'message':'If this address is eligible, a code has been sent. Resending keeps the same code while it is valid.'}
 
     @app.post('/api/auth/verification/confirm')
     def confirm(body:VerifyIn):
