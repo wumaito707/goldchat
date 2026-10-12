@@ -160,7 +160,10 @@ def install(app,b):
             conn=b['get_db']()
             try:atomic(conn,[('UPDATE verification_challenges SET expires_at=? WHERE id=? AND consumed=0',(time.time()+900,cid))])
             finally:conn.close()
-        return {'challenge_id':cid,'expires_in':900,'message':'If this address is eligible, a code has been sent. Resending keeps the same code while it is valid.'}
+        message = 'If this email is linked to a verified GOLDCHAT account, a verification code has been sent. Check your inbox and spam folder.'
+        if body.purpose != 'reset':
+            message = 'Verification code sent. Check your email inbox and spam folder.' if deliver else 'This email is already linked to an account. Sign in or use Forgot password.'
+        return {'challenge_id':cid,'expires_in':900,'message':message}
 
     @app.post('/api/auth/verification/confirm')
     def confirm(body:VerifyIn):
