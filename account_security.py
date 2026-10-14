@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger('goldchat.verification')
+CODE_TTL_SECONDS = 3600
 
 def init_schema(conn):
     columns={r[1] for r in conn.execute('PRAGMA table_info(users)')}
@@ -48,7 +49,7 @@ def delivery_ready(channel):
     return all(os.environ.get(k) for k in fields)
 
 def send_code(channel,address,code,purpose):
-    text=f'Your GOLDCHAT {purpose} verification code is {code}. It expires in 15 minutes. Repeated requests resend the same code while it remains valid. Do not share it.'
+    text=f'Your GOLDCHAT {purpose} verification code is {code}. It expires in 60 minutes. Repeated requests resend the same code while it remains valid. Do not share it.'
     if channel=='email' and os.environ.get('GOLDCHAT_EMAIL_PROVIDER')=='brevo':
         payload={'sender':{'name':'GOLDCHAT','email':os.environ['GOLDCHAT_SMTP_FROM']},'to':[{'email':address}],'subject':'Your GOLDCHAT verification code','textContent':text}
         req=urllib.request.Request('https://api.brevo.com/v3/smtp/email',data=json.dumps(payload).encode(),headers={'api-key':os.environ['GOLDCHAT_EMAIL_API_KEY'],'Content-Type':'application/json'})
@@ -153,8 +154,8 @@ def install(app,b):
                 AND NOT EXISTS(SELECT 1 FROM verification_sends WHERE address=? AND created_at>?)"""
             statements=[('DELETE FROM verification_sends WHERE created_at<?',(now-86400,)),('DELETE FROM verification_challenges WHERE created_at<?',(now-86400,)),('INSERT INTO verification_sends(id,address,ip,created_at) '+guard,(send_id,address,ip,now,address,now-3600,ip,now-3600,address,now-60))]
             if not existing:
-                statements.append(('INSERT INTO verification_challenges(id,purpose,channel,address,user_id,code_hash,created_at,expires_at,ip,reusable) SELECT ?,?,?,?,?,?,?,?,?,1 WHERE EXISTS(SELECT 1 FROM verification_sends WHERE id=?)',(cid,body.purpose,body.channel,address,user_id,code_hash(cid,code if deliver else secrets.token_hex(32)),now,now+900,ip,send_id)))
-            if existing:statements.append(('UPDATE verification_challenges SET expires_at=? WHERE id=? AND consumed=0 AND EXISTS(SELECT 1 FROM verification_sends WHERE id=?)',(now+900,cid,send_id)))
+                statements.append(('INSERT INTO verification_challenges(id,purpose,channel,address,user_id,code_hash,created_at,expires_at,ip,reusable) SELECT ?,?,?,?,?,?,?,?,?,1 WHERE EXISTS(SELECT 1 FROM verification_sends WHERE id=?)',(cid,body.purpose,body.channel,address,user_id,code_hash(cid,code if deliver else secrets.token_hex(32)),now,now+CODE_TTL_SECONDS,ip,send_id)))
+            if existing:statements.append(('UPDATE verification_challenges SET expires_at=? WHERE id=? AND consumed=0 AND EXISTS(SELECT 1 FROM verification_sends WHERE id=?)',(now+CODE_TTL_SECONDS,cid,send_id)))
             atomic(conn,statements)
             if not conn.execute('SELECT 1 FROM verification_sends WHERE id=?',(send_id,)).fetchone():raise HTTPException(429,'Wait 60 seconds before resending. You can still use the code already sent.')
         finally:conn.close()
@@ -165,14 +166,14 @@ def install(app,b):
                 logger.warning('Verification delivery failed: type=%s status=%s',type(error).__name__,getattr(error,'code','unavailable'))
                 # Delivery may already have been accepted upstream. Keep this
                 # challenge usable if the email arrives after a timeout.
-                return JSONResponse(status_code=503,content={'detail':'Email delivery could not be confirmed. If your code arrives, enter it here. Otherwise wait 60 seconds and resend.','challenge_id':cid,'expires_in':max(0,int((now+900)-time.time()))})
+                return JSONResponse(status_code=503,content={'detail':'Email delivery could not be confirmed. If your code arrives, enter it here. Otherwise wait 60 seconds and resend.','challenge_id':cid,'expires_in':max(0,int((now+CODE_TTL_SECONDS)-time.time()))})
             conn=verification_db()
-            try:atomic(conn,[('UPDATE verification_challenges SET expires_at=? WHERE id=? AND consumed=0',(time.time()+900,cid))])
+            try:atomic(conn,[('UPDATE verification_challenges SET expires_at=? WHERE id=? AND consumed=0',(time.time()+CODE_TTL_SECONDS,cid))])
             finally:conn.close()
         message = 'If this email is linked to a verified GOLDCHAT account, a verification code has been sent. Check your inbox and spam folder.'
         if body.purpose != 'reset':
             message = 'Verification code sent. Check your email inbox and spam folder.' if deliver else 'This email is already linked to an account. Sign in or use Forgot password.'
-        return {'challenge_id':cid,'expires_in':900,'message':message}
+        return {'challenge_id':cid,'expires_in':CODE_TTL_SECONDS,'message':message}
 
     @app.post('/api/auth/verification/confirm')
     def confirm(body:VerifyIn):
