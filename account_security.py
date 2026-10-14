@@ -1,11 +1,13 @@
 """Verified contact registration and recovery. Codes are never returned by APIs."""
 import json, base64, hashlib, hmac, os, re, secrets, smtplib, sqlite3, ssl, time
-import urllib.parse, urllib.request
+import urllib.parse, urllib.request, urllib.error, logging
 from email.message import EmailMessage
 from contextlib import contextmanager
 from fastapi import Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger('goldchat.verification')
 
 def init_schema(conn):
     columns={r[1] for r in conn.execute('PRAGMA table_info(users)')}
@@ -50,7 +52,11 @@ def send_code(channel,address,code,purpose):
     if channel=='email' and os.environ.get('GOLDCHAT_EMAIL_PROVIDER')=='brevo':
         payload={'sender':{'name':'GOLDCHAT','email':os.environ['GOLDCHAT_SMTP_FROM']},'to':[{'email':address}],'subject':'Your GOLDCHAT verification code','textContent':text}
         req=urllib.request.Request('https://api.brevo.com/v3/smtp/email',data=json.dumps(payload).encode(),headers={'api-key':os.environ['GOLDCHAT_EMAIL_API_KEY'],'Content-Type':'application/json'})
-        with urllib.request.urlopen(req,timeout=15) as response:response.read()
+        with urllib.request.urlopen(req,timeout=15) as response:
+            accepted=json.load(response)
+        if not accepted.get('messageId'):
+            raise ValueError('Email provider did not confirm acceptance')
+        logger.info('Verification email accepted by Brevo')
     elif channel=='email':
         message=EmailMessage();message['From']=os.environ['GOLDCHAT_SMTP_FROM'];message['To']=address
         message['Subject']='Your GOLDCHAT verification code';message.set_content(text)
@@ -128,7 +134,8 @@ def install(app,b):
         if not delivery_ready(body.channel):raise HTTPException(503,'Email verification is not configured yet')
         user_id=b['auth_user'](token)['id'] if body.purpose=='link' else None
         now=time.time();ip=request.client.host if request.client else 'unknown'
-        conn=b['get_db']()
+        verification_db=b.get('get_verification_db',b['get_db'])
+        conn=verification_db()
         try:
             queries=[('SELECT id FROM users WHERE verified_email=?',(address,)),
                 ('SELECT * FROM verification_challenges WHERE address=? AND purpose=? AND channel=? AND consumed=0 AND attempts<5 AND reusable=1 AND expires_at>? ORDER BY created_at DESC LIMIT 1',(address,body.purpose,body.channel,now+60))]
@@ -153,11 +160,13 @@ def install(app,b):
         finally:conn.close()
         if deliver:
             try:send_code(body.channel,address,code,body.purpose)
-            except Exception:
+            except Exception as error:
+                # Do not log recipients, codes, credentials or provider bodies.
+                logger.warning('Verification delivery failed: type=%s status=%s',type(error).__name__,getattr(error,'code','unavailable'))
                 # Delivery may already have been accepted upstream. Keep this
                 # challenge usable if the email arrives after a timeout.
                 return JSONResponse(status_code=503,content={'detail':'Email delivery could not be confirmed. If your code arrives, enter it here. Otherwise wait 60 seconds and resend.','challenge_id':cid,'expires_in':max(0,int((now+900)-time.time()))})
-            conn=b['get_db']()
+            conn=verification_db()
             try:atomic(conn,[('UPDATE verification_challenges SET expires_at=? WHERE id=? AND consumed=0',(time.time()+900,cid))])
             finally:conn.close()
         message = 'If this email is linked to a verified GOLDCHAT account, a verification code has been sent. Check your inbox and spam folder.'

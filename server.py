@@ -63,12 +63,17 @@ async def database_error(request: Request, error: sqlite3.OperationalError):
     return JSONResponse(status_code=503, content={'detail':'GOLDCHAT could not reach its database. Please try again shortly.'})
 
 # ---------- DB ----------
-def get_db():
+def get_db(*, cleanup=True):
     conn = cloud_database.connect(os.environ['TURSO_DATABASE_URL'],os.environ['TURSO_AUTH_TOKEN']) if os.environ.get('TURSO_DATABASE_URL') else sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
-    social.cleanup_expired(conn)
+    if cleanup:
+        social.cleanup_expired(conn)
     return conn
+
+def get_verification_db():
+    # Verification never reads messages or statuses; avoid remote chat cleanup.
+    return get_db(cleanup=False)
 
 def init_db():
     conn = get_db()
