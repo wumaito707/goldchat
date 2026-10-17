@@ -44,6 +44,7 @@ for logger_name in ('uvicorn.error', 'uvicorn.access'):
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query, Request, Depends
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
@@ -72,6 +73,22 @@ async def lifespan(app):
     yield
 
 app = FastAPI(title="GoldChat", lifespan=lifespan)
+_allowed_origins = {
+    "https://goldchat-app.pages.dev",
+    "https://goldchat.onrender.com",
+    "https://goldchat-frankfurt.onrender.com",
+}
+_extra_origin = os.environ.get("GOLDCHAT_WEB_ORIGIN", "").strip()
+if _extra_origin:
+    _allowed_origins.add(_extra_origin.rstrip("/"))
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=sorted(_allowed_origins),
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    max_age=3600,
+)
 sponsorship_payments.install(app)
 
 # Turso is a remote database. Running expiry cleanup for every API request
