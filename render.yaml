@@ -25,3 +25,9 @@ services:
         sync: false
       - key: GOLDCHAT_SMTP_FROM
         sync: false
+      - key: GOLDCHAT_VAPID_PUBLIC_KEY
+        sync: false
+      - key: GOLDCHAT_VAPID_PRIVATE_KEY
+        sync: false
+      - key: GOLDCHAT_PAYSTACK_PAYMENT_LINK
+        sync: false

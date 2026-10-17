@@ -181,12 +181,12 @@ def install(app, b):
             'reply':{'id':reply['id'],'text':'Message deleted' if reply['deleted'] else reply['text']} if reply else None,
             'reactions':[dict(r) for r in reacts], 'starred':starred}
 
-    async def changed(cid):
+    async def changed(cid, event=None):
         with connection() as conn:
             ids=[r['user_id'] for r in conn.execute('SELECT user_id FROM chat_members WHERE chat_id=?',(cid,))]
         conn.close()
         for uid in ids:
-            await manager.send_to_user(uid, {'type':'chat_changed','chat_id':cid})
+            await manager.send_to_user(uid, event or {'type':'chat_changed','chat_id':cid})
 
     @app.get('/api/v2/chats')
     def chats(token: str = Depends(b["session_token"])):
