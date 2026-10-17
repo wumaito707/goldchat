@@ -9,6 +9,7 @@ import json
 import time
 import os
 import sys
+import threading
 from pathlib import Path
 # Prefer the repaired project-local runtime when present.
 runtime_vendor = Path(__file__).parent / "vendor-runtime"
@@ -57,6 +58,18 @@ STATIC_DIR = BASE / "static"
 app = FastAPI(title="GoldChat")
 sponsorship_payments.install(app)
 
+# Turso is a remote database. Running expiry cleanup for every API request
+# delays user-facing requests with avoidable database work.
+_cleanup_lock = threading.Lock()
+_last_expired_cleanup = 0.0
+_CLEANUP_INTERVAL_SECONDS = 300
+
+# Startup makes several authenticated requests at once. Reuse a fresh session
+# briefly so those requests do not each repeat the same remote Turso lookup.
+_auth_cache_lock = threading.Lock()
+_auth_cache = {}
+_AUTH_CACHE_SECONDS = 8
+
 @app.exception_handler(sqlite3.OperationalError)
 async def database_error(request: Request, error: sqlite3.OperationalError):
     logging.getLogger('uvicorn.error').error('Database operation failed: %s', str(error))
@@ -67,8 +80,12 @@ def get_db(*, cleanup=True):
     conn = cloud_database.connect(os.environ['TURSO_DATABASE_URL'],os.environ['TURSO_AUTH_TOKEN']) if os.environ.get('TURSO_DATABASE_URL') else sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
-    if cleanup:
-        social.cleanup_expired(conn)
+    global _last_expired_cleanup
+    if cleanup and time.monotonic() - _last_expired_cleanup >= _CLEANUP_INTERVAL_SECONDS:
+        with _cleanup_lock:
+            if time.monotonic() - _last_expired_cleanup >= _CLEANUP_INTERVAL_SECONDS:
+                social.cleanup_expired(conn)
+                _last_expired_cleanup = time.monotonic()
     return conn
 
 def get_verification_db():
@@ -399,11 +416,19 @@ def require_member(chat_id: int, user_id: int):
 
 
 def auth_user(token: str):
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    now = time.monotonic()
+    with _auth_cache_lock:
+        cached = _auth_cache.get(token_hash)
+        if cached and cached[0] > now:
+            return cached[1]
     with get_db() as conn:
-        row = conn.execute("SELECT u.* FROM users u JOIN sessions s ON s.user_id=u.id WHERE s.token_hash=? AND s.expires_at>?", (hashlib.sha256(token.encode()).hexdigest(),time.time())).fetchone()
+        row = conn.execute("SELECT u.* FROM users u JOIN sessions s ON s.user_id=u.id WHERE s.token_hash=? AND s.expires_at>?", (token_hash,time.time())).fetchone()
     conn.close()
     if row is None:
         raise HTTPException(401, "Invalid or expired session")
+    with _auth_cache_lock:
+        _auth_cache[token_hash] = (now + _AUTH_CACHE_SECONDS, row)
     return row
 
 
@@ -413,6 +438,8 @@ async def logout(token: str = Depends(session_token)):
     with get_db() as conn:
         conn.execute("DELETE FROM sessions WHERE token_hash=?", (hashlib.sha256(token.encode()).hexdigest(),))
     conn.close()
+    with _auth_cache_lock:
+        _auth_cache.pop(hashlib.sha256(token.encode()).hexdigest(), None)
     # This token's sockets are closed; other signed-in devices stay online.
     for wsid, info in list(mgr.active.items()):
         if info.get("token") == token:
