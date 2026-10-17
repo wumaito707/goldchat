@@ -10,6 +10,7 @@ import time
 import os
 import sys
 import threading
+from contextlib import asynccontextmanager
 from pathlib import Path
 # Prefer the repaired project-local runtime when present.
 runtime_vendor = Path(__file__).parent / "vendor-runtime"
@@ -40,7 +41,7 @@ class RedactSessionTokens(logging.Filter):
 
 for logger_name in ('uvicorn.error', 'uvicorn.access'):
     logging.getLogger(logger_name).addFilter(RedactSessionTokens())
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query, Request, Depends
 from fastapi.staticfiles import StaticFiles
@@ -55,7 +56,22 @@ email_config.load_config(DATA_DIR)
 DB_PATH = DATA_DIR / "goldchat.db"
 STATIC_DIR = BASE / "static"
 
-app = FastAPI(title="GoldChat")
+def initialize_runtime():
+    if os.environ.get('RENDER')=='true':
+        required=('TURSO_DATABASE_URL','TURSO_AUTH_TOKEN','GOLDCHAT_STORAGE_URL','GOLDCHAT_STORAGE_KEY','GOLDCHAT_STORAGE_BUCKET','GOLDCHAT_VERIFICATION_SECRET','GOLDCHAT_EMAIL_API_KEY','GOLDCHAT_SMTP_FROM')
+        if any(not os.environ.get(name) for name in required):
+            raise RuntimeError('Cloud database, private storage, verification secret and email settings are required on Render')
+    if os.environ.get('RENDER')=='true' and os.environ.get('GOLDCHAT_EMAIL_PROVIDER')!='brevo':
+        raise RuntimeError('Render requires Brevo email API delivery')
+    cloud_media.validate_private()
+    init_db()
+
+@asynccontextmanager
+async def lifespan(app):
+    initialize_runtime()
+    yield
+
+app = FastAPI(title="GoldChat", lifespan=lifespan)
 sponsorship_payments.install(app)
 
 # Turso is a remote database. Running expiry cleanup for every API request
@@ -220,7 +236,7 @@ mgr = ConnectionManager()
 
 # ---------- Helpers ----------
 def now_iso():
-    return datetime.utcnow().isoformat() + "Z"
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 def fmt_time(iso):
     try:
@@ -603,8 +619,9 @@ async def ws_endpoint(websocket: WebSocket, token: str = Query("")):
                     "mine": False,
                 }
                 SOCIAL_HOOKS["notify_message"](msg_id)
-                # to everyone in chat (including sender for echo)
-                await FEATURE_HOOKS["changed"](chat_id)
+                # Send the complete message to every linked device immediately.
+                # This avoids a follow-up REST fetch for ordinary new messages.
+                await FEATURE_HOOKS["changed"](chat_id, payload)
             elif t == "typing":
                 chat_id = int(data["chat_id"])
                 is_typing = bool(data.get("typing", True))
@@ -642,17 +659,6 @@ def health():
     return {"ok": True}
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
-
-@app.on_event("startup")
-def startup():
-    if os.environ.get('RENDER')=='true':
-        required=('TURSO_DATABASE_URL','TURSO_AUTH_TOKEN','GOLDCHAT_STORAGE_URL','GOLDCHAT_STORAGE_KEY','GOLDCHAT_STORAGE_BUCKET','GOLDCHAT_VERIFICATION_SECRET','GOLDCHAT_EMAIL_API_KEY','GOLDCHAT_SMTP_FROM')
-        if any(not os.environ.get(name) for name in required):
-            raise RuntimeError('Cloud database, private storage, verification secret and email settings are required on Render')
-    if os.environ.get('RENDER')=='true' and os.environ.get('GOLDCHAT_EMAIL_PROVIDER')!='brevo':
-        raise RuntimeError('Free Render requires Brevo email API delivery')
-    cloud_media.validate_private()
-    init_db()
 
 if __name__ == "__main__":
     import uvicorn
