@@ -12,7 +12,7 @@ from pydantic import BaseModel,Field
 TIMERS={0,86400,604800,7776000}
 
 def init_schema(conn):
-    additions=[('users','avatar_media_id','INTEGER'),('messages','expires_at','REAL'),('attachments','expires_at','REAL'),('chats','disappearing_seconds','INTEGER NOT NULL DEFAULT 0'),('statuses','media_id','INTEGER'),('sessions','label',"TEXT NOT NULL DEFAULT 'Browser'"),('sessions','created_at','REAL NOT NULL DEFAULT 0')]
+    additions=[('users','avatar_media_id','INTEGER'),('messages','expires_at','REAL'),('attachments','expires_at','REAL'),('chats','disappearing_seconds','INTEGER NOT NULL DEFAULT 0'),('statuses','media_id','INTEGER'),('statuses','background',"TEXT NOT NULL DEFAULT '#82c9a9'"),('statuses','font','INTEGER NOT NULL DEFAULT 0'),('sessions','label',"TEXT NOT NULL DEFAULT 'Browser'"),('sessions','created_at','REAL NOT NULL DEFAULT 0')]
     for table,column,definition in additions:
         if column not in {r[1] for r in conn.execute(f'PRAGMA table_info({table})')}:
             conn.execute(f'ALTER TABLE {table} ADD COLUMN {column} {definition}')
@@ -64,6 +64,8 @@ class MediaIn(BaseModel):
 class StatusIn(BaseModel):
     text:str=Field(default='',max_length=700)
     media_id:int|None=None
+    background:str='#82c9a9'
+    font:int=0
 class TimerIn(BaseModel):
     seconds:int
 class CookieIn(BaseModel):
@@ -237,6 +239,8 @@ def install(app,b,hooks):
     async def post_status(body:StatusIn,token:str=Depends(b["session_token"])):
         user=uid(token)
         if not body.text.strip() and not body.media_id:raise HTTPException(400,'Write text or choose a photo, video or audio file')
+        if body.background not in {'#82c9a9','#1f7a74','#7258a8','#b75e68','#bd893d','#263d59'} or body.font not in range(4):
+            raise HTTPException(400,'Choose a supported status style')
         deadline=time.time()+86400
         name=b['auth_user'](token)['display_name']
         with db() as conn:
@@ -245,7 +249,7 @@ def install(app,b,hooks):
                 if not media or media['expires_at']<=time.time():raise HTTPException(400,'Upload your own status media first')
                 if conn.execute('SELECT 1 FROM statuses WHERE media_id=?',(body.media_id,)).fetchone():raise HTTPException(400,'This media has already been posted')
                 conn.execute('UPDATE social_media SET expires_at=? WHERE id=?',(deadline,body.media_id))
-            sid=conn.execute('INSERT INTO statuses(user_id,text,media_id,created_at,expires_at) VALUES(?,?,?,?,?)',(user,body.text.strip(),body.media_id,b['now_iso'](),deadline)).lastrowid
+            sid=conn.execute('INSERT INTO statuses(user_id,text,media_id,background,font,created_at,expires_at) VALUES(?,?,?,?,?,?,?)',(user,body.text.strip(),body.media_id,body.background,body.font,b['now_iso'](),deadline)).lastrowid
             viewers=[r[0] for r in conn.execute('SELECT user_id FROM contacts WHERE contact_id=?',(user,))]
             for viewer in viewers:
                 if can_status(viewer,user,conn):alert(conn,viewer,'status',name,'New status update')
