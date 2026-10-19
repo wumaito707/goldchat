@@ -101,22 +101,74 @@ async function refreshStatusRail(providedRows=null){
 }
 document.addEventListener('visibilitychange',()=>{if(!document.hidden&&TOKEN&&Date.now()-lastStatusRailAt>60000)refreshStatusRail();});
 showStatuses=async function(focusUserId=null){
-  const rows=await request('/api/social/statuses');refreshStatusRail(rows);panel('Status updates','<p class="helper">Post photos, videos, audio or text. Every status disappears 24 hours after posting and follows your profile privacy setting.</p>'+field('statusText','Text or caption')+'<label class="feature-btn file-picker">Choose photo, video or audio<input id="statusFile" type="file" accept="image/png,image/jpeg,image/gif,image/webp,video/mp4,video/webm,audio/*"></label><div id="statusFileName" class="helper"></div>'+action('postStatus','Post status')+action('recordStatusAudio','Record audio status')+'<div id="statusList"></div>','page');selectMainSection('Updates');
-  document.getElementById('statusFile').onchange=e=>{document.getElementById('statusFileName').textContent=e.target.files[0]?.name||'';};
-  bind('postStatus',async()=>{const file=document.getElementById('statusFile').files[0];const text=document.getElementById('statusText').value;const media=file?await uploadSocialFile(file,'status'):null;await request('/api/social/statuses','POST',{text,media_id:media?.id||null});await showStatuses();});
-  let recording=null,stream=null,chunks=[],stopped=false,timeout;
-  socialCleanup=()=>{clearTimeout(timeout);stopped=true;if(recording?.state==='recording')recording.stop();stream?.getTracks().forEach(t=>t.stop());};
-  document.getElementById('recordStatusAudio').onclick=async()=>{
-    if(recording?.state==='recording'){recording.stop();return;}
-    try{if(!navigator.mediaDevices||!window.MediaRecorder)throw new Error('Recording requires a supported browser on localhost or HTTPS');stream=await navigator.mediaDevices.getUserMedia({audio:true});if(stopped){stream.getTracks().forEach(t=>t.stop());return;}recording=new MediaRecorder(stream);chunks=[];recording.ondataavailable=e=>{if(e.data.size)chunks.push(e.data);};
-      recording.onstop=async()=>{clearTimeout(timeout);stream.getTracks().forEach(t=>t.stop());if(stopped)return;try{const blob=new Blob(chunks,{type:recording.mimeType});const ext=blob.type.includes('mp4')?'m4a':blob.type.includes('ogg')?'ogg':'webm';const media=await uploadSocialFile(new File([blob],'status-audio.'+ext,{type:blob.type}),'status');await request('/api/social/statuses','POST',{text:document.getElementById('statusText')?.value||'',media_id:media.id});await showStatuses();}catch(e){toast(e.message);}};
-      recording.start();document.getElementById('recordStatusAudio').textContent='Stop & post audio';timeout=setTimeout(()=>{if(recording?.state==='recording')recording.stop();},120000);
-    }catch(e){toast('Microphone unavailable: '+e.message);}
-  };
-  const list=document.getElementById('statusList');if(!rows.length)list.innerHTML='<p class="helper">No updates yet.</p>';
-  rows.forEach(s=>{const card=document.createElement('article');card.className='feature-card status-card';card.dataset.expires=s.expires_at;card.dataset.userId=s.user_id;setTimeout(()=>card.remove(),Math.max(0,s.expires_at*1000-Date.now()));card.innerHTML=`<div class="status-author"><div class="chat-avatar">${avatarContent(s)}</div><strong>${escapeHtml(s.display_name)}</strong></div>${socialMediaMarkup(s.media)}<p>${escapeHtml(s.text)}</p><small>Disappears ${new Date(s.expires_at*1000).toLocaleString()}</small>`;if(s.user_id===ME.id){const b=document.createElement('button');b.className='feature-btn';b.textContent='Delete status';b.onclick=async()=>{try{await request('/api/social/statuses/'+s.id,'DELETE');await showStatuses(ME.id);}catch(e){toast(e.message);}};card.appendChild(b);}list.appendChild(card);});
-  if(focusUserId!=null)list.querySelector(`.status-card[data-user-id="${Number(focusUserId)}"]`)?.scrollIntoView({block:'nearest'});
+  const rows=(await request('/api/social/statuses')).filter(s=>s.expires_at*1000>Date.now());
+  refreshStatusRail(rows);
+  const selected=focusUserId==null?rows:rows.filter(s=>s.user_id===Number(focusUserId));
+  const title=focusUserId===ME.id?'My status':selected[0]?.display_name||'Status updates';
+  panel(title,`<div class="status-view-actions"><button class="feature-btn" id="backToUpdates">← Updates</button><button class="feature-btn" id="addAnotherStatus">＋ Add status</button></div><div id="statusList" class="status-view-list"></div>`,'page');selectMainSection('Updates');
+  bind('backToUpdates',showUpdatesPage);bind('addAnotherStatus',showAddStatusPage);
+  const list=document.getElementById('statusList');
+  if(!selected.length)list.innerHTML='<p class="helper">No active status. Add a photo, video, voice note or text.</p>';
+  selected.forEach(s=>{
+    const card=document.createElement('article');card.className='status-view-card';card.dataset.expires=s.expires_at;
+    card.innerHTML=`<div class="status-author"><span class="status-ring">${avatarContent(s)}</span><span><strong>${escapeHtml(s.user_id===ME.id?'My status':s.display_name)}</strong><small>${new Date(s.created_at).toLocaleString()}</small></span></div><div class="status-view-content">${socialMediaMarkup(s.media)}${s.text?`<p>${escapeHtml(s.text)}</p>`:''}</div><small>Disappears ${new Date(s.expires_at*1000).toLocaleString()}</small>`;
+    if(s.user_id===ME.id){const remove=document.createElement('button');remove.className='feature-btn';remove.textContent='Delete status';remove.onclick=async()=>{try{await request('/api/social/statuses/'+s.id,'DELETE');await showStatuses(ME.id);}catch(e){toast(e.message);}};card.appendChild(remove);}
+    list.appendChild(card);
+    setTimeout(()=>{if(card.isConnected)card.remove();},Math.max(0,s.expires_at*1000-Date.now()));
+  });
 };
+const statusColours=['#82c9a9','#1f7a74','#7258a8','#b75e68','#bd893d','#263d59'];
+const statusFonts=['system-ui, sans-serif','Georgia, serif','Trebuchet MS, sans-serif','monospace'];
+async function showStatusComposer(mode='text'){
+  const profile=await request('/api/profile');
+  const mediaMode=mode!=='text';
+  panel('Add status',`<div class="status-editor" id="statusEditor"><div class="status-editor-tools"><button type="button" id="statusEmoji" aria-label="Add emoji">☺</button><button type="button" id="statusFont" aria-label="Change font">Aa</button><button type="button" id="statusColour" aria-label="Change background colour">◉</button></div><div class="status-canvas" id="statusCanvas"><div id="statusPreview"></div><textarea id="statusText" maxlength="1000" placeholder="${mediaMode?'Add a caption…':'Type a status'}" aria-label="${mediaMode?'Status caption':'Status text'}"></textarea></div><div id="statusEmojiChoices" class="status-emoji-choices" hidden></div><div class="status-media-tools" id="statusMediaTools" ${mediaMode?'':'hidden'}><button type="button" class="feature-btn" id="chooseStatusFile">${mode==='audio'||mode==='voice'?'Choose audio file':'Choose photo or video'}</button>${mode==='media'?'<button type="button" class="feature-btn" id="takeStatusPhoto">Use camera</button>':''}${mode==='voice'?'<button type="button" class="feature-btn" id="recordStatusVoice">Record voice</button>':''}<input id="statusFile" type="file" hidden></div><div class="status-editor-footer"><label for="statusAudience">Audience <select id="statusAudience"><option value="everyone">Contacts who follow me</option><option value="contacts">Mutual contacts</option><option value="nobody">Only me</option></select></label><button type="button" id="postStatus" class="status-send" aria-label="Post status">➤</button></div><p class="helper status-privacy-note">Audience also changes who can see your profile presence. Status disappears after 24 hours.</p></div>`,'page');
+  selectMainSection('Updates');
+  const editor=document.getElementById('statusEditor'),canvas=document.getElementById('statusCanvas'),text=document.getElementById('statusText'),preview=document.getElementById('statusPreview'),input=document.getElementById('statusFile');
+  const audience=document.getElementById('statusAudience'),send=document.getElementById('postStatus');audience.value=profile.privacy;
+  let colourIndex=0,fontIndex=0,selectedFile=null,previewURL=null,recording=null,stream=null,recordTimer=null,closed=false;
+  canvas.style.background=statusColours[colourIndex];
+  const clearPreview=()=>{if(previewURL){URL.revokeObjectURL(previewURL);previewURL=null;}preview.replaceChildren();};
+  const setFile=file=>{
+    if(!file)return;
+    if(file.size>10*1024*1024){toast('Choose a file under 10 MB');return;}
+    if(!/^(image\/(png|jpeg|gif|webp)|video\/(mp4|webm)|audio\/)/.test(file.type)){toast('Choose a supported photo, video or audio file');return;}
+    selectedFile=file;clearPreview();previewURL=URL.createObjectURL(file);
+    const item=document.createElement(file.type.startsWith('image/')?'img':file.type.startsWith('video/')?'video':'audio');item.src=previewURL;item.className='status-draft-media';
+    if(item.tagName!=='IMG'){item.controls=true;item.preload='metadata';}if(item.tagName==='VIDEO')item.playsInline=true;
+    preview.appendChild(item);editor.classList.add('has-media');
+  };
+  socialCleanup=()=>{closed=true;clearTimeout(recordTimer);if(recording?.state==='recording')recording.stop();stream?.getTracks().forEach(t=>t.stop());clearPreview();};
+  document.getElementById('statusColour').onclick=()=>{colourIndex=(colourIndex+1)%statusColours.length;canvas.style.background=statusColours[colourIndex];};
+  document.getElementById('statusFont').onclick=()=>{fontIndex=(fontIndex+1)%statusFonts.length;text.style.fontFamily=statusFonts[fontIndex];};
+  const emojis=document.getElementById('statusEmojiChoices');
+  emojis.innerHTML=['😀','❤️','✨','🎉','🙏','👍'].map((e,i)=>`<button type="button" data-index="${i}">${e}</button>`).join('');
+  document.getElementById('statusEmoji').onclick=()=>{emojis.hidden=!emojis.hidden;};
+  emojis.onclick=e=>{const button=e.target.closest('button');if(button){text.value+=['😀','❤️','✨','🎉','🙏','👍'][Number(button.dataset.index)];emojis.hidden=true;text.focus();}};
+  if(mediaMode){
+    input.accept=mode==='audio'||mode==='voice'?'audio/*':'image/png,image/jpeg,image/gif,image/webp,video/mp4,video/webm';
+    document.getElementById('chooseStatusFile').onclick=()=>input.click();
+    input.onchange=()=>setFile(input.files[0]);
+    const camera=document.getElementById('takeStatusPhoto');if(camera)camera.onclick=()=>{input.accept='image/*';input.capture='environment';input.click();};
+    const voice=document.getElementById('recordStatusVoice');if(voice)voice.onclick=async()=>{
+      if(recording?.state==='recording'){recording.stop();return;}
+      try{if(!navigator.mediaDevices?.getUserMedia||!window.MediaRecorder)throw new Error('Microphone recording needs a supported browser on HTTPS');
+        stream=await navigator.mediaDevices.getUserMedia({audio:true});if(closed){stream.getTracks().forEach(t=>t.stop());return;}
+        recording=new MediaRecorder(stream);const chunks=[];recording.ondataavailable=e=>{if(e.data.size)chunks.push(e.data);};
+        recording.onstop=()=>{clearTimeout(recordTimer);stream.getTracks().forEach(t=>t.stop());voice.textContent='Record again';if(closed)return;
+          const type=recording.mimeType||chunks[0]?.type||'audio/webm',ext=type.includes('mp4')?'m4a':type.includes('ogg')?'ogg':'webm';
+          setFile(new File(chunks,'status-voice-'+Date.now()+'.'+ext,{type}));};
+        recording.start();voice.textContent='Stop recording';recordTimer=setTimeout(()=>{if(recording?.state==='recording')recording.stop();},120000);
+      }catch(error){stream?.getTracks().forEach(t=>t.stop());toast('Microphone unavailable: '+error.message);}
+    };
+  }
+  send.onclick=async()=>{const caption=text.value.trim();if(!caption&&!selectedFile)return toast('Write a status or choose media');
+    send.disabled=true;try{const media=selectedFile?await uploadSocialFile(selectedFile,'status'):null;
+      if(audience.value!==profile.privacy){ME=await request('/api/profile','PATCH',{display_name:profile.display_name,bio:profile.bio||'',privacy:audience.value});}
+      await request('/api/social/statuses','POST',{text:caption,media_id:media?.id||null});toast('Status posted');await showUpdatesPage();
+    }catch(error){toast(error.message);send.disabled=false;}};
+  if(mode==='text')text.focus();
+}
 async function copyMessageText(m){if(!m.text)throw new Error('No text to copy');if(navigator.clipboard?.writeText){await navigator.clipboard.writeText(m.text);toast('Text copied');closePanel();}else{panel('Copy text','<textarea id="manualCopy" class="manual-copy" readonly>'+escapeHtml(m.text)+'</textarea><p class="helper">Select and copy the text.</p>');document.getElementById('manualCopy').select();}}
 async function shareMessageText(m){if(navigator.share)await navigator.share({title:'GOLDCHAT',text:m.text});else await copyMessageText(m);}
 async function showDisappearingSettings(){
