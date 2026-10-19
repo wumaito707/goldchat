@@ -360,6 +360,12 @@ function appendMessage(m){
   const reactions = (m.reactions||[]).map(r=>`${escapeHtml(r.emoji)} ${r.count}`).join('  ');
   wrap.innerHTML = `<div class="bubble">${who}${m.forwarded?'<small class="forward-label">↪ Forwarded</small>':''}${reply}${file}<span class="message-text">${escapeHtml(m.text)}</span><span class="meta">${m.expires_at?'⏳ ':''}${m.starred?'★ ':''}${m.edited?'edited ':''}${escapeHtml(m.iso?fmtTime(m.iso):(m.time||''))} ${checks}</span><div class="reactions">${reactions}</div></div>`;
   if(wrap.querySelector('.voice-note')){wrap.classList.add('voice-message');setupVoiceNote(wrap.querySelector('.voice-note'));}
+  const imageLoad=wrap.querySelector('.image-load');
+  if(imageLoad)imageLoad.addEventListener('click',()=>{
+    const link=document.createElement('a');link.className='image-preview-link';link.href=imageLoad.dataset.src;link.target='_blank';link.rel='noopener noreferrer';link.setAttribute('aria-label','Open photo');
+    const image=document.createElement('img');image.className='media-preview';image.src=imageLoad.dataset.src;image.alt=imageLoad.dataset.name||'Photo';image.referrerPolicy='no-referrer';
+    link.appendChild(image);imageLoad.replaceWith(link);
+  });
   if (!m.deleted) {
     const more=document.createElement('button'); more.className='message-more'; more.textContent='⋯'; more.title='Message actions'; more.setAttribute('aria-label','Message actions');
     more.addEventListener('click',()=>messageActions(m)); wrap.appendChild(more);

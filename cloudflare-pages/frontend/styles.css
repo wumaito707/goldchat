@@ -468,6 +468,8 @@ kbd {border:1px solid var(--gold-dim);border-bottom-width:3px;border-radius:5px;
 .call-controls {display:flex;gap:12px;}
 .field textarea {width:100%;resize:vertical;background:var(--black-2);color:var(--text);border:1px solid var(--black-3);border-radius:9px;padding:12px;font:inherit;}
 .media-preview {display:block;max-width:100%;max-height:320px;width:auto;border-radius:10px;margin:6px 0;object-fit:contain;background:var(--black-2);}
+.image-preview-link {display:inline-block;max-width:100%;line-height:0;}
+.image-load {display:block;min-width:170px;min-height:110px;margin:6px 0;border:1px solid var(--black-3);border-radius:10px;background:var(--black-2);color:var(--text);cursor:pointer;font:inherit;}
 .audio-preview {display:block;max-width:100%;width:280px;margin:6px 0;}
 .voice-note {display:flex;align-items:center;gap:10px;min-width:250px;padding:7px 2px;}
 .voice-note-icon {display:grid;place-items:center;width:34px;height:34px;border-radius:50%;background:var(--gold-soft);color:var(--gold-bright);font-size:17px;}

@@ -357,9 +357,13 @@ function attachmentMarkup(file,message) {
     const bars=voiceBarHeights.map(height=>`<span style="height:${height}px"></span>`).join('');
     return `<div class="voice-note">${voiceAvatarMarkup(message?.sender||ME)}<button class="voice-play" type="button" aria-label="Play voice message"><svg class="voice-play-icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg></button><div class="voice-track"><div class="voice-waveform" aria-hidden="true">${bars}</div><span class="voice-duration">0:00</span></div><audio src="${preview}" preload="${settingOn('gc_auto_audio')?'metadata':'none'}" aria-label="Voice message"></audio></div>`;
   }
+  if(mime.startsWith('image/')){
+    const label=escapeHtml(file.name||'Photo');
+    if(settingOn('gc_auto_images'))return `<a class="image-preview-link" href="${preview}" target="_blank" rel="noopener noreferrer" aria-label="Open photo"><img class="media-preview" src="${preview}" alt="${label}" loading="lazy" referrerpolicy="no-referrer"></a>`;
+    return `<button class="image-load" type="button" data-src="${preview}" data-name="${label}">View photo</button>`;
+  }
   let media='';
-  if(mime.startsWith('image/')&&settingOn('gc_auto_images'))media=`<img class="media-preview" src="${preview}" alt="${escapeHtml(file.name)}" loading="lazy" referrerpolicy="no-referrer">`;
-  else if(mime.startsWith('audio/')&&settingOn('gc_auto_audio'))media=`<audio class="audio-preview" aria-label="Audio attachment" src="${preview}" controls preload="metadata"></audio>`;
+  if(mime.startsWith('audio/')&&settingOn('gc_auto_audio'))media=`<audio class="audio-preview" aria-label="Audio attachment" src="${preview}" controls preload="metadata"></audio>`;
   else if(mime.startsWith('video/')&&settingOn('gc_auto_video',false))media=`<video class="media-preview" src="${preview}" controls preload="metadata" playsinline></video>`;
   return media+`<a class="file-link" href="${url}" target="_blank" rel="noopener noreferrer">📎 ${escapeHtml(file.name)} (${Math.ceil(file.size/1024)} KB)</a>`;
 }
