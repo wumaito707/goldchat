@@ -356,9 +356,10 @@ function appendMessage(m){
   const checks = m.mine ? receiptMarkup(m.read) : '';
   const who = (!m.mine && chats.find(c=>c.id===activeChatId)?.type !== 'direct') ? '<strong class="sender-name">'+escapeHtml(m.sender.display_name)+'</strong>' : ''; 
   const reply = m.reply ? `<div class="reply-preview">↪ ${escapeHtml(m.reply.text.slice(0,100))}</div>` : '';
-  const file = attachmentMarkup(m.attachment);
+  const file = attachmentMarkup(m.attachment,m);
   const reactions = (m.reactions||[]).map(r=>`${escapeHtml(r.emoji)} ${r.count}`).join('  ');
   wrap.innerHTML = `<div class="bubble">${who}${m.forwarded?'<small class="forward-label">↪ Forwarded</small>':''}${reply}${file}<span class="message-text">${escapeHtml(m.text)}</span><span class="meta">${m.expires_at?'⏳ ':''}${m.starred?'★ ':''}${m.edited?'edited ':''}${escapeHtml(m.iso?fmtTime(m.iso):(m.time||''))} ${checks}</span><div class="reactions">${reactions}</div></div>`;
+  if(wrap.querySelector('.voice-note')){wrap.classList.add('voice-message');setupVoiceNote(wrap.querySelector('.voice-note'));}
   if (!m.deleted) {
     const more=document.createElement('button'); more.className='message-more'; more.textContent='⋯'; more.title='Message actions'; more.setAttribute('aria-label','Message actions');
     more.addEventListener('click',()=>messageActions(m)); wrap.appendChild(more);
@@ -367,6 +368,34 @@ function appendMessage(m){
   const tb = box.querySelector('.typing-bubble');
   if (tb) box.insertBefore(wrap, tb); else box.appendChild(wrap);
   box.scrollTop = box.scrollHeight;
+}
+
+function voiceTime(seconds){
+  if(!Number.isFinite(seconds)||seconds<0)return '0:00';
+  const rounded=Math.floor(seconds);
+  return Math.floor(rounded/60)+':'+String(rounded%60).padStart(2,'0');
+}
+function setupVoiceNote(note){
+  const audio=note.querySelector('audio'),button=note.querySelector('.voice-play');
+  const duration=note.querySelector('.voice-duration'),bars=[...note.querySelectorAll('.voice-waveform span')];
+  const update=()=>{
+    const length=Number.isFinite(audio.duration)?audio.duration:0;
+    duration.textContent=voiceTime(audio.paused&&audio.currentTime===0?length:audio.currentTime);
+    const progress=length?audio.currentTime/length:0;
+    bars.forEach((bar,index)=>bar.classList.toggle('played',index<Math.round(progress*bars.length)));
+    const playing=!audio.paused&&!audio.ended;
+    button.classList.toggle('playing',playing);
+    button.setAttribute('aria-label',playing?'Pause voice message':'Play voice message');
+    button.querySelector('path').setAttribute('d',playing?'M7 5h4v14H7zm6 0h4v14h-4z':'M8 5v14l11-7z');
+  };
+  for(const event of ['loadedmetadata','durationchange','timeupdate','play','pause','ended'])audio.addEventListener(event,update);
+  audio.addEventListener('error',()=>{duration.textContent='Audio unavailable';button.disabled=true;});
+  button.addEventListener('click',async()=>{
+    if(!audio.paused){audio.pause();return;}
+    document.querySelectorAll('.voice-note audio').forEach(other=>{if(other!==audio)other.pause();});
+    try{await audio.play();}catch(e){toast('Could not play this voice message');}
+  });
+  update();
 }
 
 function showTypingBubble(){
@@ -396,7 +425,10 @@ function wsSend(obj){
   if (ws && ws.readyState===1){ ws.send(JSON.stringify(obj)); }
 }
 
-function updateSendBtn(){ sendBtn.classList.toggle('active', composerInput.value.trim().length>0); }
+function updateSendBtn(){
+  sendBtn.classList.toggle('active',composerInput.value.trim().length>0);
+  if(typeof syncComposerActions==='function')syncComposerActions();
+}
 composerInput.addEventListener('input', ()=>{
   composerInput.style.height='auto';
   composerInput.style.height=Math.min(composerInput.scrollHeight,120)+'px';

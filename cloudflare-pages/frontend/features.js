@@ -117,11 +117,12 @@ document.querySelector('.search-wrap').before(toolbar);
 const headerTools=document.createElement('div');headerTools.className='header-actions';
 headerTools.innerHTML=action('chatTools','⋯');document.querySelector('.chat-header').appendChild(headerTools);
 const uploadInput=document.createElement('input');uploadInput.type='file';uploadInput.hidden=true;document.body.appendChild(uploadInput);
-const voiceBtn=document.createElement('button');voiceBtn.className='icon-btn voice-record-btn';voiceBtn.innerHTML='<span aria-hidden="true">🎙</span>';voiceBtn.title='Record voice message';voiceBtn.setAttribute('aria-label','Record voice message');
+const voiceMicSvg='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="13" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v4m-4 0h8"/></svg>';
+const voiceBtn=document.createElement('button');voiceBtn.type='button';voiceBtn.className='icon-btn voice-record-btn';voiceBtn.innerHTML=voiceMicSvg;voiceBtn.title='Record voice message';voiceBtn.setAttribute('aria-label','Record voice message');
 document.querySelector('.composer').insertBefore(voiceBtn,sendBtn);
 const voiceRecordingBar=document.createElement('div');voiceRecordingBar.id='voiceRecordingBar';voiceRecordingBar.className='voice-recording-bar';voiceRecordingBar.hidden=true;voiceRecordingBar.innerHTML='<span class="recording-dot" aria-hidden="true"></span><strong>Recording voice note</strong><time>0:00</time><span>Tap the microphone again to send</span>';
 document.querySelector('.composer').before(voiceRecordingBar);
-function syncComposerActions(){const typed=!!composerInput.value.trim();voiceBtn.hidden=typed;sendBtn.hidden=!typed;}
+function syncComposerActions(){const typed=!!composerInput.value.trim(),recording=voiceBtn.classList.contains('recording');voiceBtn.hidden=typed&&!recording;sendBtn.hidden=!typed||recording;}
 composerInput.addEventListener('input',syncComposerActions);syncComposerActions();
 
 document.getElementById('featuresMenu').onclick=()=>{
@@ -157,7 +158,7 @@ document.getElementById('attachBtn').onclick=()=>{
   bind('attachCamera',()=>chooseChatAttachment('image/*,video/*',true));
 };
 document.getElementById('cameraBtn').onclick=()=>{if(!activeChatId)return toast('Open a chat first');chooseChatAttachment('image/*,video/*',true);};
-document.querySelector('[title="Emoji"]').onclick=()=>{
+document.getElementById('emojiBtn').onclick=()=>{
   panel('Choose an emoji','<div class="emoji-grid">'+['😀','😂','❤️','👍','🙏','🎉','🔥','😎','😢','✨','💛','👋','😊','🥳','🚀','💯'].map((e,i)=>action('emoji'+i,e)).join('')+'</div>');
   document.querySelectorAll('.emoji-grid button').forEach(b=>b.onclick=()=>{composerInput.value+=b.textContent;saveDraft();updateSendBtn();closePanel();composerInput.focus();});
 };
@@ -341,14 +342,25 @@ async function handleMembershipRemoved(cid) {
   }
   await loadChats();
 }
-function attachmentMarkup(file) {
+function voiceAvatarMarkup(user){
+  const avatar=user?.avatar_media_id?`<img src="/api/social/media/${encodeURIComponent(user.avatar_media_id)}" alt="" loading="lazy">`:escapeHtml(user?.avatar_initial||user?.display_name?.charAt(0)||'G');
+  return `<span class="voice-avatar" aria-hidden="true">${avatar}<span class="voice-avatar-mic">${voiceMicSvg}</span></span>`;
+}
+const voiceBarHeights=[8,13,19,26,16,11,23,30,18,10,15,25,32,17,12,21,28,15,9,18,26,34,20,13,23,16,29,12,19,25,14,9];
+function attachmentMarkup(file,message) {
   if(!file)return '';
-  const url='/api/attachments/'+file.id;
+  const url='/api/attachments/'+encodeURIComponent(file.id);
   const preview=url+'?inline=true';
+  const mime=String(file.mime||'');
+  const voice=mime.startsWith('audio/')&&/^voice[-_].+\.(webm|ogg|m4a|mp4|wav|mp3)$/i.test(file.name||'');
+  if(voice){
+    const bars=voiceBarHeights.map(height=>`<span style="height:${height}px"></span>`).join('');
+    return `<div class="voice-note">${voiceAvatarMarkup(message?.sender||ME)}<button class="voice-play" type="button" aria-label="Play voice message"><svg class="voice-play-icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg></button><div class="voice-track"><div class="voice-waveform" aria-hidden="true">${bars}</div><span class="voice-duration">0:00</span></div><audio src="${preview}" preload="${settingOn('gc_auto_audio')?'metadata':'none'}" aria-label="Voice message"></audio></div>`;
+  }
   let media='';
-  if(file.mime.startsWith('image/')&&settingOn('gc_auto_images'))media=`<img class="media-preview" src="${preview}" alt="${escapeHtml(file.name)}" loading="lazy" referrerpolicy="no-referrer">`;
-  else if(file.mime.startsWith('audio/')&&settingOn('gc_auto_audio'))media=`<div class="voice-note"><span class="voice-note-icon" aria-hidden="true">🎙</span><div><audio class="audio-preview" aria-label="Voice note" src="${preview}" controls preload="metadata"></audio><small>Voice message</small></div></div>`;
-  else if(file.mime.startsWith('video/')&&settingOn('gc_auto_video',false))media=`<video class="media-preview" src="${preview}" controls preload="metadata" playsinline></video>`;
+  if(mime.startsWith('image/')&&settingOn('gc_auto_images'))media=`<img class="media-preview" src="${preview}" alt="${escapeHtml(file.name)}" loading="lazy" referrerpolicy="no-referrer">`;
+  else if(mime.startsWith('audio/')&&settingOn('gc_auto_audio'))media=`<audio class="audio-preview" aria-label="Audio attachment" src="${preview}" controls preload="metadata"></audio>`;
+  else if(mime.startsWith('video/')&&settingOn('gc_auto_video',false))media=`<video class="media-preview" src="${preview}" controls preload="metadata" playsinline></video>`;
   return media+`<a class="file-link" href="${url}" target="_blank" rel="noopener noreferrer">📎 ${escapeHtml(file.name)} (${Math.ceil(file.size/1024)} KB)</a>`;
 }
 async function showEvents() {
@@ -384,8 +396,8 @@ async function sendFile(file,cid) {
 }
 uploadInput.onchange=async()=>{const file=uploadInput.files[0],cid=activeChatId;uploadInput.value='';if(!file||!cid)return;try{await sendFile(file,cid);}catch(e){toast(e.message);}};
 let recorder=null,recordStarting=false,voiceRecordingStartedAt=0,voiceRecordingTicker=null;
-function resetVoiceRecorderUI(){clearInterval(voiceRecordingTicker);voiceRecordingTicker=null;voiceRecordingBar.hidden=true;voiceBtn.classList.remove('recording');voiceBtn.innerHTML='<span aria-hidden="true">🎙</span>';voiceBtn.title='Record voice message';voiceBtn.setAttribute('aria-label','Record voice message');}
-function showVoiceRecorderUI(){voiceRecordingStartedAt=Date.now();voiceRecordingBar.hidden=false;voiceBtn.classList.add('recording');voiceBtn.innerHTML='<span aria-hidden="true">■</span>';voiceBtn.title='Stop recording and send';voiceBtn.setAttribute('aria-label','Stop recording and send');const timer=voiceRecordingBar.querySelector('time');const render=()=>{const seconds=Math.floor((Date.now()-voiceRecordingStartedAt)/1000);timer.textContent=Math.floor(seconds/60)+':'+String(seconds%60).padStart(2,'0');};render();voiceRecordingTicker=setInterval(render,500);}
+function resetVoiceRecorderUI(){clearInterval(voiceRecordingTicker);voiceRecordingTicker=null;voiceRecordingBar.hidden=true;voiceBtn.classList.remove('recording');voiceBtn.innerHTML=voiceMicSvg;voiceBtn.title='Record voice message';voiceBtn.setAttribute('aria-label','Record voice message');syncComposerActions();}
+function showVoiceRecorderUI(){voiceRecordingStartedAt=Date.now();voiceRecordingBar.hidden=false;voiceBtn.classList.add('recording');voiceBtn.innerHTML='<span aria-hidden="true">■</span>';voiceBtn.title='Stop recording and send';voiceBtn.setAttribute('aria-label','Stop recording and send');syncComposerActions();const timer=voiceRecordingBar.querySelector('time');const render=()=>{const seconds=Math.floor((Date.now()-voiceRecordingStartedAt)/1000);timer.textContent=Math.floor(seconds/60)+':'+String(seconds%60).padStart(2,'0');};render();voiceRecordingTicker=setInterval(render,500);}
 function voiceRecordingOptions() {
   const mimeType=['audio/webm;codecs=opus','audio/mp4','audio/ogg;codecs=opus'].find(type=>MediaRecorder.isTypeSupported(type));
   return mimeType?{mimeType}:{};

@@ -7,7 +7,7 @@
 <meta name="theme-color" content="#d4af37">
 <link rel="manifest" href="/static/manifest.webmanifest">
 <link rel="apple-touch-icon" href="/static/icons/icon-192.png">
-<link rel="stylesheet" href="/static/styles.css?v=updates-chat-1">
+<link rel="stylesheet" href="/static/styles.css?v=voice-composer-1">
 </head>
 <body>
 
@@ -132,16 +132,18 @@
       <div id="replyBar" hidden></div>
 
       <div class="composer">
-        <button class="icon-btn" id="attachBtn" title="Attach">
+        <div class="composer-field">
+        <button class="icon-btn composer-emoji" id="emojiBtn" title="Emoji" aria-label="Choose emoji">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><path d="M9 9h.01"/><path d="M15 9h.01"/></svg>
+        </button>
+        <textarea class="composer-input" id="composerInput" rows="1" placeholder="Message" aria-label="Message"></textarea>
+        <button class="icon-btn" id="attachBtn" title="Attach" aria-label="Attach file">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.44 11.05-9.19 9.19a5 5 0 0 1-7.07-7.07l9.19-9.19a3.5 3.5 0 0 1 4.95 4.95L9.9 18.08a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
         </button>
         <button class="icon-btn" id="cameraBtn" title="Camera" aria-label="Camera">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h3l1.5-2h7L17 7h3a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2Z"/><circle cx="12" cy="13" r="3.5"/></svg>
         </button>
-        <textarea class="composer-input" id="composerInput" rows="1" placeholder="Type a message…"></textarea>
-        <button class="icon-btn" title="Emoji">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><path d="M9 9h.01"/><path d="M15 9h.01"/></svg>
-        </button>
+        </div>
         <button class="send-btn" id="sendBtn">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg>
         </button>
@@ -153,8 +155,8 @@
 <div class="toast" id="toast"></div>
 <div id="modalRoot"></div>
 
-<script src="/static/app.js?v=performance-1" defer></script>
-<script src="/static/features.js?v=updates-chat-1" defer></script>
+<script src="/static/app.js?v=voice-composer-1" defer></script>
+<script src="/static/features.js?v=voice-composer-1" defer></script>
 <script src="/static/vendor/jsQR.js" defer></script>
 <script src="/static/social.js?v=performance-1" defer></script>
 <script src="/static/phone-permissions.js?v=1" defer></script>
