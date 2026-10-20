@@ -224,16 +224,23 @@ async function showBlocks() {
 }
 async function showUpdatesPage(){
   const rows=await request('/api/social/statuses');
-  panel('Updates',`<section class="updates-page"><button class="my-status feature-btn" id="addStatusFromUpdates"><span class="status-add-avatar">+</span><span><strong>Add status</strong><small>Disappears after 24 hours</small></span></button><h4>Recent updates</h4><div id="updatesList"></div></section>`,'page');selectMainSection('Updates');
-  bind('addStatusFromUpdates',showAddStatusPage);
+  const myLatest=rows.find(s=>s.user_id===ME.id&&s.expires_at*1000>Date.now());
+  panel('Updates',`<section class="updates-page"><div class="my-status-row"><button class="my-status feature-btn" id="myStatusFromUpdates"><span class="status-add-avatar">${myLatest?avatarContent(ME):'+'}</span><span><strong>${myLatest?'My status':'Add status'}</strong><small>${myLatest?new Date(myLatest.created_at).toLocaleString():'Disappears after 24 hours'}</small></span></button>${myLatest?'<button type="button" class="status-add-more" id="addStatusFromUpdates" aria-label="Add another status">+</button>':''}</div><div class="status-quick-actions"><button class="feature-btn" id="quickTextStatus">✎ Text</button><button class="feature-btn" id="quickMediaStatus">▣ Photo or video</button></div><h4>Recent updates</h4><div id="updatesList"></div></section>`,'page');selectMainSection('Updates');
+  bind('myStatusFromUpdates',myLatest?()=>showStatuses(ME.id):showAddStatusPage);
+  if(myLatest)bind('addStatusFromUpdates',showAddStatusPage);
+  bind('quickTextStatus',()=>showStatusComposer('text'));
+  bind('quickMediaStatus',()=>showStatusComposer('media'));
   const list=document.getElementById('updatesList');
-  if(!rows.length){list.innerHTML='<p class="helper">No recent updates. Share a photo, video, voice note, music or text update.</p>';return;}
+  if(!rows.some(s=>s.user_id!==ME.id&&s.expires_at*1000>Date.now())){list.innerHTML='<p class="helper">No recent updates from other people yet.</p>';return;}
   const newest=new Map();rows.filter(s=>s.expires_at*1000>Date.now()).forEach(s=>{if(!newest.has(s.user_id))newest.set(s.user_id,s);});
-  newest.forEach(s=>{const button=document.createElement('button');button.className='status-list-item';button.innerHTML=`<span class="status-ring">${avatarContent(s)}</span><span><strong>${escapeHtml(s.user_id===ME.id?'My status':s.display_name)}</strong><small>${new Date(s.created_at*1000).toLocaleString()}</small></span>`;button.onclick=()=>showStatuses(s.user_id);list.appendChild(button);});
+  newest.forEach(s=>{if(s.user_id===ME.id)return;const button=document.createElement('button');button.className='status-list-item';button.innerHTML=`<span class="status-ring">${avatarContent(s)}</span><span><strong>${escapeHtml(s.display_name)}</strong><small>${new Date(s.created_at).toLocaleString()}</small></span>`;button.onclick=()=>showStatuses(s.user_id);list.appendChild(button);});
 }
 function showAddStatusPage(){
-  panel('Add status',`<div class="status-create-actions">${action('statusTextAction','✎<span>Text</span>')}${action('statusMusicAction','♫<span>Music</span>')}${action('statusLayoutAction','▦<span>Layout</span>')}${action('statusVoiceAction','🎙<span>Voice</span>')}${action('statusCameraAction','▣<span>Camera</span>')}</div><p class="helper">Choose text, music, a layout, voice, or a photo/video from your camera or gallery. Every update disappears after 24 hours.</p>`,'page');selectMainSection('Updates');
-  bind('statusTextAction',()=>showStatuses());bind('statusMusicAction',()=>{toast('Choose an audio file in the status editor.');showStatuses();});bind('statusLayoutAction',()=>{toast('Choose text and add it to your status.');showStatuses();});bind('statusVoiceAction',()=>showStatuses());bind('statusCameraAction',()=>showStatuses());
+  panel('Add status',`<p class="helper">Choose what to share. Your status disappears after 24 hours.</p><div class="status-create-actions">${action('statusTextAction','✎<span>Text</span>')}${action('statusMediaAction','▣<span>Photo / video</span>')}${action('statusAudioAction','♫<span>Audio file</span>')}${action('statusVoiceAction','🎙<span>Voice</span>')}</div>`,'page');selectMainSection('Updates');
+  bind('statusTextAction',()=>showStatusComposer('text'));
+  bind('statusMediaAction',()=>showStatusComposer('media'));
+  bind('statusAudioAction',()=>showStatusComposer('audio'));
+  bind('statusVoiceAction',()=>showStatusComposer('voice'));
 }
 function showChatThemes(){
   const choices=[['midnight','Midnight'],['gold','Gold Classic'],['dots','Gold dots'],['paper','Light paper']];
