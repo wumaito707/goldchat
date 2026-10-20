@@ -103,20 +103,49 @@ document.addEventListener('visibilitychange',()=>{if(!document.hidden&&TOKEN&&Da
 showStatuses=async function(focusUserId=null){
   const rows=(await request('/api/social/statuses')).filter(s=>s.expires_at*1000>Date.now());
   refreshStatusRail(rows);
-  const selected=focusUserId==null?rows:rows.filter(s=>s.user_id===Number(focusUserId));
-  const title=focusUserId===ME.id?'My status':selected[0]?.display_name||'Status updates';
-  panel(title,`<div class="status-view-actions"><button class="feature-btn" id="backToUpdates">← Updates</button><button class="feature-btn" id="addAnotherStatus">＋ Add status</button></div><div id="statusList" class="status-view-list"></div>`,'page');selectMainSection('Updates');
-  bind('backToUpdates',showUpdatesPage);bind('addAnotherStatus',showAddStatusPage);
-  const list=document.getElementById('statusList');
-  if(!selected.length)list.innerHTML='<p class="helper">No active status. Add a photo, video, voice note or text.</p>';
-  selected.forEach(s=>{
-    const card=document.createElement('article');card.className='status-view-card';card.dataset.expires=s.expires_at;
-    card.innerHTML=`<div class="status-author"><span class="status-ring">${avatarContent(s)}</span><span><strong>${escapeHtml(s.user_id===ME.id?'My status':s.display_name)}</strong><small>${new Date(s.created_at).toLocaleString()}</small></span></div><div class="status-view-content">${socialMediaMarkup(s.media)}${s.text?`<p>${escapeHtml(s.text)}</p>`:''}</div><small>Disappears ${new Date(s.expires_at*1000).toLocaleString()}</small>`;
-    if(!s.media){const content=card.querySelector('.status-view-content');content.style.background=statusColours.includes(s.background)?s.background:statusColours[0];content.style.fontFamily=statusFonts[Number.isInteger(s.font)&&s.font>=0&&s.font<statusFonts.length?s.font:0];content.style.color='white';}
-    if(s.user_id===ME.id){const remove=document.createElement('button');remove.className='feature-btn';remove.textContent='Delete status';remove.onclick=async()=>{try{await request('/api/social/statuses/'+s.id,'DELETE');await showStatuses(ME.id);}catch(e){toast(e.message);}};card.appendChild(remove);}
-    list.appendChild(card);
-    setTimeout(()=>{if(card.isConnected)card.remove();},Math.max(0,s.expires_at*1000-Date.now()));
-  });
+  const userId=focusUserId==null?rows[0]?.user_id:Number(focusUserId);
+  const selected=rows.filter(s=>s.user_id===userId).reverse();
+  if(!selected.length){await showUpdatesPage();toast('No active status to view');return;}
+  let index=0,elapsed=0,paused=false,timer=null,closed=false;
+  const mine=userId===ME.id;
+  panel(mine?'My status':selected[0].display_name,`<div class="status-player" id="statusPlayer"><div class="status-progress" id="statusProgress"></div><div class="status-player-top"><button class="status-player-icon" id="statusBack" aria-label="Back to updates">←</button><span class="status-player-avatar" id="statusPlayerAvatar"></span><span class="status-player-name"><strong id="statusPlayerName"></strong><small id="statusPlayerTime"></small></span><button class="status-player-icon" id="statusPause" aria-label="Pause status">Ⅱ</button>${mine?'<button class="status-player-icon" id="statusAdd" aria-label="Add another status">＋</button><button class="status-player-icon" id="statusMenu" aria-label="Status options">⋮</button>':''}</div><div class="status-player-content" id="statusPlayerContent"></div><div class="status-player-bottom" id="statusPlayerBottom"></div><button class="status-player-nav previous" id="statusPrevious" aria-label="Previous status"></button><button class="status-player-nav next" id="statusNext" aria-label="Next status"></button></div>`,'page');
+  selectMainSection('Updates');
+  const player=document.getElementById('statusPlayer'),content=document.getElementById('statusPlayerContent'),bottom=document.getElementById('statusPlayerBottom'),progress=document.getElementById('statusProgress');
+  const stop=()=>{if(timer){clearInterval(timer);timer=null;}};
+  socialCleanup=()=>{closed=true;stop();const media=content.querySelector('audio,video');if(media)media.pause();};
+  const duration=s=>s.media?.mime?.startsWith('video/')||s.media?.mime?.startsWith('audio/')?15000:6000;
+  const advance=step=>{const next=index+step;if(next<0){showUpdatesPage();return;}if(next>=selected.length){showUpdatesPage();return;}index=next;render();};
+  const tick=()=>{if(paused||closed)return;elapsed+=100;const s=selected[index];if(!s||s.expires_at*1000<=Date.now()){showUpdatesPage();return;}const fill=progress.children[index]?.firstElementChild;if(fill)fill.style.width=Math.min(100,elapsed/duration(s)*100)+'%';if(elapsed>=duration(s))advance(1);};
+  async function render(){
+    stop();const previous=content.querySelector('audio,video');if(previous)previous.pause();elapsed=0;paused=false;const s=selected[index];
+    progress.innerHTML=selected.map((_,i)=>`<span><i style="width:${i<index?'100%':'0%'}"></i></span>`).join('');
+    document.getElementById('statusPlayerAvatar').innerHTML=avatarContent(s);
+    document.getElementById('statusPlayerName').textContent=mine?'You':s.display_name;
+    document.getElementById('statusPlayerTime').textContent=new Date(s.created_at).toLocaleString();
+    document.getElementById('statusPause').textContent='Ⅱ';
+    content.innerHTML=`${socialMediaMarkup(s.media)}${s.text?`<p>${escapeHtml(s.text)}</p>`:''}`;
+    content.style.background=!s.media&&statusColours.includes(s.background)?s.background:'#11181b';
+    content.style.fontFamily=statusFonts[Number.isInteger(s.font)&&s.font>=0&&s.font<statusFonts.length?s.font:0];
+    bottom.replaceChildren();
+    if(mine){
+      const views=document.createElement('button');views.className='status-viewers';views.textContent='◉ Viewers';
+      views.onclick=async()=>{stop();paused=true;document.getElementById('statusPause').textContent='▶';try{const data=await request('/api/social/statuses/'+s.id+'/views');if(closed)return;bottom.innerHTML=`<div class="status-viewer-list"><strong>${data.count} ${data.count===1?'view':'views'}</strong>${data.viewers.map(v=>`<div>${escapeHtml(v.display_name)} · ${new Date(v.viewed_at).toLocaleString()}</div>`).join('')}</div>`;}catch(e){toast(e.message);}};
+      bottom.appendChild(views);
+      request('/api/social/statuses/'+s.id+'/views').then(data=>{if(!closed&&selected[index]?.id===s.id)views.textContent=`◉ ${data.count} ${data.count===1?'view':'views'}`;}).catch(()=>{});
+    }else request('/api/social/statuses/'+s.id+'/view','POST').catch(()=>{});
+    const media=content.querySelector('audio,video');
+    if(media){media.addEventListener('play',()=>{paused=true;document.getElementById('statusPause').textContent='▶';});media.addEventListener('pause',()=>{paused=false;document.getElementById('statusPause').textContent='Ⅱ';});media.addEventListener('ended',()=>advance(1));}
+    timer=setInterval(tick,100);
+  }
+  document.getElementById('statusBack').onclick=showUpdatesPage;
+  document.getElementById('statusPrevious').onclick=()=>advance(-1);
+  document.getElementById('statusNext').onclick=()=>advance(1);
+  document.getElementById('statusPause').onclick=()=>{paused=!paused;document.getElementById('statusPause').textContent=paused?'▶':'Ⅱ';};
+  if(mine){
+    document.getElementById('statusAdd').onclick=showAddStatusPage;
+    document.getElementById('statusMenu').onclick=()=>{stop();paused=true;document.getElementById('statusPause').textContent='▶';bottom.innerHTML='<button class="feature-btn" id="deleteCurrentStatus">Delete this status</button>';document.getElementById('deleteCurrentStatus').onclick=()=>confirmAction('Delete status','Delete this status update?',async()=>{await request('/api/social/statuses/'+selected[index].id,'DELETE');await showStatuses(ME.id);});};
+  }
+  render();
 };
 const statusColours=['#82c9a9','#1f7a74','#7258a8','#b75e68','#bd893d','#263d59'];
 const statusFonts=['system-ui, sans-serif','Georgia, serif','Trebuchet MS, sans-serif','monospace'];

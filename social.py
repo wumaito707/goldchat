@@ -22,6 +22,7 @@ def init_schema(conn):
     CREATE TABLE IF NOT EXISTS device_links(id TEXT PRIMARY KEY,approval_hash TEXT NOT NULL,poll_hash TEXT NOT NULL,label TEXT NOT NULL,expires_at REAL NOT NULL,approved_uid INTEGER,consumed INTEGER NOT NULL DEFAULT 0);
     CREATE TABLE IF NOT EXISTS call_history(id TEXT PRIMARY KEY,chat_id INTEGER NOT NULL REFERENCES chats(id),caller_id INTEGER NOT NULL REFERENCES users(id),callee_id INTEGER NOT NULL REFERENCES users(id),video INTEGER NOT NULL DEFAULT 0,status TEXT NOT NULL,created_at REAL NOT NULL,connected_at REAL,ended_at REAL);
     CREATE TABLE IF NOT EXISTS message_hidden(message_id INTEGER NOT NULL REFERENCES messages(id),user_id INTEGER NOT NULL REFERENCES users(id),PRIMARY KEY(message_id,user_id));
+    CREATE TABLE IF NOT EXISTS status_views(status_id INTEGER NOT NULL,viewer_id INTEGER NOT NULL,viewed_at TEXT NOT NULL,PRIMARY KEY(status_id,viewer_id));
     CREATE INDEX IF NOT EXISTS idx_message_expiry ON messages(expires_at);
     CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id,id);
     ''')
@@ -42,7 +43,7 @@ def cleanup_expired(conn):
             statements.append((f'DELETE FROM {table} WHERE {col} IN ({marks})',expired))
         statements.append((f'UPDATE messages SET reply_to=NULL WHERE reply_to IN ({marks})',expired))
         statements.append((f'DELETE FROM messages WHERE id IN ({marks})',expired))
-    statements.extend([('DELETE FROM statuses WHERE expires_at<=?',(now,)),('DELETE FROM device_links WHERE expires_at<=?',(now,))])
+    statements.extend([('DELETE FROM status_views WHERE status_id IN (SELECT id FROM statuses WHERE expires_at<=?)',(now,)),('DELETE FROM statuses WHERE expires_at<=?',(now,)),('DELETE FROM device_links WHERE expires_at<=?',(now,))])
     for row in data[2]:
         statements.append(("UPDATE call_history SET status='missed',ended_at=? WHERE id=?",(now,row['id'])))
         statements.append(("INSERT INTO notifications(user_id,kind,title,body,chat_id,created_at) VALUES(?,?,?,?,?,?)",(row['callee_id'],'call','Missed call',row['display_name']+' called',row['chat_id'],datetime.fromtimestamp(now,timezone.utc).isoformat())))
@@ -262,9 +263,29 @@ def install(app,b,hooks):
         with db() as conn:
             row=conn.execute('SELECT * FROM statuses WHERE id=? AND user_id=?',(sid,user)).fetchone()
             if not row:raise HTTPException(404,'Status not found')
+            conn.execute('DELETE FROM status_views WHERE status_id=?',(sid,))
             conn.execute('DELETE FROM statuses WHERE id=?',(sid,))
             if row['media_id']:conn.execute('UPDATE social_media SET expires_at=? WHERE id=?',(time.time(),row['media_id']))
         return {'ok':True}
+
+    @app.post('/api/social/statuses/{sid}/view')
+    def view_status(sid:int,token:str=Depends(b["session_token"])):
+        viewer=uid(token)
+        with db() as conn:
+            row=conn.execute('SELECT user_id FROM statuses WHERE id=? AND expires_at>?',(sid,time.time())).fetchone()
+            if not row or not can_status(viewer,row['user_id'],conn):raise HTTPException(404,'Status unavailable')
+            if viewer!=row['user_id']:
+                conn.execute('INSERT OR IGNORE INTO status_views(status_id,viewer_id,viewed_at) VALUES(?,?,?)',(sid,viewer,b['now_iso']()))
+        return {'ok':True}
+
+    @app.get('/api/social/statuses/{sid}/views')
+    def status_views(sid:int,token:str=Depends(b["session_token"])):
+        owner=uid(token)
+        with db() as conn:
+            row=conn.execute('SELECT user_id FROM statuses WHERE id=? AND expires_at>?',(sid,time.time())).fetchone()
+            if not row or row['user_id']!=owner:raise HTTPException(404,'Status unavailable')
+            viewers=[{'id':r['id'],'display_name':r['display_name'],'viewed_at':r['viewed_at']} for r in conn.execute('SELECT u.id,u.display_name,v.viewed_at FROM status_views v JOIN users u ON u.id=v.viewer_id WHERE v.status_id=? ORDER BY v.viewed_at DESC',(sid,))]
+        return {'count':len(viewers),'viewers':viewers}
 
     @app.get('/api/social/notifications')
     def notifications(token:str=Depends(b["session_token"])):
