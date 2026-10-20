@@ -250,7 +250,7 @@ function showChatThemes(){
 }
 async function showStatuses() {
   const rows=await request('/api/statuses');
-  panel('Status updates','<p class="helper">Updates expire after 24 hours and follow your profile privacy setting.</p>'+field('statusText','Share an update')+action('postStatus','Post status')+'<div id="statusList"></div>');
+  panel('Status updates','<p class="helper">Updates expire after 24 hours. New posts use your current profile privacy setting unless you choose an audience in Add status.</p>'+field('statusText','Share an update')+action('postStatus','Post status')+'<div id="statusList"></div>');
   bind('postStatus',async()=>{await request('/api/statuses','POST',{text:document.getElementById('statusText').value});await showStatuses();});
   const list=document.getElementById('statusList');if(!rows.length) list.innerHTML='<p class="helper">No updates yet.</p>';
   rows.forEach(s=>{const card=document.createElement('article');card.className='feature-card';card.innerHTML=`<strong>${escapeHtml(s.display_name)}</strong><p>${escapeHtml(s.text)}</p><small>${new Date(s.created_at).toLocaleString()}</small>`;if(s.user_id===ME.id){const b=document.createElement('button');b.className='feature-btn';b.textContent='Delete';b.onclick=async()=>{try{await request('/api/statuses/'+s.id,'DELETE');showStatuses();}catch(e){toast(e.message);}};card.appendChild(b);}list.appendChild(card);});

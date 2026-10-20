@@ -187,7 +187,7 @@ function handleWSEvent(d){
   }
   else if (d.type === 'presence'){
     const chat = chats.find(c=> c.peer && c.peer.id===d.user_id);
-    if (chat){ chat.peer_online = d.online; renderChatList(); if (d.user_id === getPeerId(activeChatId)) updateHeaderStatus(); }
+    if (chat){ chat.peer_online = d.online; chat.peer_last_seen = d.online ? null : d.last_seen; renderChatList(); if (d.user_id === getPeerId(activeChatId)) updateHeaderStatus(); }
   }
   else if (d.type === 'pong'){
     // keepalive
@@ -323,7 +323,9 @@ function updateHeaderStatus(){
   if (c.peer_online){
     el.textContent = 'online'; el.className = 'header-status online';
   } else {
-    el.textContent = 'offline or presence hidden'; el.className = 'header-status';
+    const seen=c.peer_last_seen ? new Date(c.peer_last_seen) : null;
+    el.textContent = seen && !Number.isNaN(seen.getTime()) ? 'last seen '+seen.toLocaleString(undefined,{dateStyle:'medium',timeStyle:'short'}) : '';
+    el.className = 'header-status';
   }
 }
 

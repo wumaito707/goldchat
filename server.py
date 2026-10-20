@@ -206,8 +206,15 @@ class ConnectionManager:
         ONLINE.get(uid, set()).discard(ws_id)
         if not ONLINE.get(uid):
             ONLINE.pop(uid, None)
+            last_seen = now_iso()
+            conn = get_db(cleanup=False)
+            try:
+                conn.execute('UPDATE users SET last_seen_at=? WHERE id=?', (last_seen, uid))
+                conn.commit()
+            finally:
+                conn.close()
             import asyncio
-            asyncio.create_task(self.broadcast_presence(uid, False))
+            asyncio.create_task(self.broadcast_presence(uid, False, last_seen))
 
     async def subscribe(self, ws_id, chat_id):
         self.active[ws_id]["chat_ids"].add(chat_id)
@@ -233,7 +240,7 @@ class ConnectionManager:
                 except Exception:
                     self.disconnect(ws_id)
 
-    async def broadcast_presence(self, user_id, online):
+    async def broadcast_presence(self, user_id, online, last_seen=None, include_hidden=False):
         # notify all users sharing a chat with this user
         conn = get_db()
         shared = conn.execute("""
@@ -243,10 +250,12 @@ class ConnectionManager:
         """, (user_id, user_id)).fetchall()
         conn.close()
         for row in shared:
-            if not presence_visible(user_id, row["user_id"]):
+            visible = presence_visible(user_id, row["user_id"])
+            if not visible and not include_hidden:
                 continue
             await self.send_to_user(row["user_id"], {
-                "type": "presence", "user_id": user_id, "online": online
+                "type": "presence", "user_id": user_id, "online": online and visible,
+                "last_seen": None if online or not visible else last_seen
             })
 
 mgr = ConnectionManager()
@@ -343,6 +352,7 @@ def chat_list_for(user_id):
             } if last else None,
             "unread": unread,
             "peer_online": (peer["id"] in ONLINE and presence_visible(peer["id"], user_id)) if peer else False,
+            "peer_last_seen": (peer["last_seen_at"] if peer["id"] not in ONLINE else None) if peer and presence_visible(peer["id"], user_id) else None,
         })
     conn.close()
     return out

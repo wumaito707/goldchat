@@ -12,7 +12,7 @@ from pydantic import BaseModel,Field
 TIMERS={0,86400,604800,7776000}
 
 def init_schema(conn):
-    additions=[('users','avatar_media_id','INTEGER'),('messages','expires_at','REAL'),('attachments','expires_at','REAL'),('chats','disappearing_seconds','INTEGER NOT NULL DEFAULT 0'),('statuses','media_id','INTEGER'),('statuses','background',"TEXT NOT NULL DEFAULT '#82c9a9'"),('statuses','font','INTEGER NOT NULL DEFAULT 0'),('sessions','label',"TEXT NOT NULL DEFAULT 'Browser'"),('sessions','created_at','REAL NOT NULL DEFAULT 0')]
+    additions=[('users','avatar_media_id','INTEGER'),('users','last_seen_at','TEXT'),('messages','expires_at','REAL'),('attachments','expires_at','REAL'),('chats','disappearing_seconds','INTEGER NOT NULL DEFAULT 0'),('statuses','media_id','INTEGER'),('statuses','background',"TEXT NOT NULL DEFAULT '#82c9a9'"),('statuses','font','INTEGER NOT NULL DEFAULT 0'),('statuses','audience','TEXT'),('sessions','label',"TEXT NOT NULL DEFAULT 'Browser'"),('sessions','created_at','REAL NOT NULL DEFAULT 0')]
     for table,column,definition in additions:
         if column not in {r[1] for r in conn.execute(f'PRAGMA table_info({table})')}:
             conn.execute(f'ALTER TABLE {table} ADD COLUMN {column} {definition}')
@@ -67,6 +67,7 @@ class StatusIn(BaseModel):
     media_id:int|None=None
     background:str='#82c9a9'
     font:int=0
+    audience:str|None=None
 class TimerIn(BaseModel):
     seconds:int
 class CookieIn(BaseModel):
@@ -96,13 +97,15 @@ def install(app,b,hooks):
         finally:conn.close()
     def uid(token):return b['auth_user'](token)['id']
     def media_public(row):return {k:row[k] for k in ('id','name','mime','size')}
-    def can_status(viewer,author,conn):
+    def can_status(viewer,author,conn,audience=None):
         if viewer==author:return True
         if conn.execute('SELECT 1 FROM blocks WHERE (user_id=? AND blocked_id=?) OR (user_id=? AND blocked_id=?)',(viewer,author,author,viewer)).fetchone():return False
-        p=conn.execute('SELECT privacy FROM users WHERE id=?',(author,)).fetchone()
+        if audience is None:
+            p=conn.execute('SELECT privacy FROM users WHERE id=?',(author,)).fetchone()
+            audience=p[0] if p else 'nobody'
         follows=conn.execute('SELECT 1 FROM contacts WHERE user_id=? AND contact_id=?',(viewer,author)).fetchone()
         known=conn.execute('SELECT 1 FROM contacts WHERE user_id=? AND contact_id=?',(author,viewer)).fetchone()
-        return bool(p and follows and (p[0]=='everyone' or (p[0]=='contacts' and known)))
+        return bool(follows and (audience=='everyone' or (audience=='contacts' and known)))
     def qr(text):
         import qrcode
         from qrcode.image.svg import SvgPathImage
@@ -218,8 +221,8 @@ def install(app,b,hooks):
             if not media:raise HTTPException(404,'Media unavailable')
             if media['expires_at'] and media['expires_at']<=time.time():raise HTTPException(404,'Status expired')
             if media['purpose']=='status' and user!=media['user_id']:
-                active=conn.execute('SELECT 1 FROM statuses WHERE media_id=? AND expires_at>?',(mid,time.time())).fetchone()
-                if not active or not can_status(user,media['user_id'],conn):raise HTTPException(403,'Status unavailable')
+                active=conn.execute('SELECT audience FROM statuses WHERE media_id=? AND expires_at>?',(mid,time.time())).fetchone()
+                if not active or not can_status(user,media['user_id'],conn,active['audience']):raise HTTPException(403,'Status unavailable')
             elif media['purpose']=='avatar':
                 if not conn.execute('SELECT 1 FROM users WHERE avatar_media_id=?',(mid,)).fetchone():raise HTTPException(404,'Profile picture removed')
         if not cloud_media.exists(root,media['path']):raise HTTPException(404,'Media unavailable')
@@ -231,7 +234,7 @@ def install(app,b,hooks):
         with db() as conn:
             result=[]
             for row in conn.execute('SELECT s.*,u.username,u.display_name,u.avatar_initial,u.avatar_media_id FROM statuses s JOIN users u ON u.id=s.user_id WHERE s.expires_at>? ORDER BY s.id DESC',(time.time(),)):
-                if not can_status(user,row['user_id'],conn):continue
+                if not can_status(user,row['user_id'],conn,row['audience']):continue
                 status=dict(row);media=conn.execute('SELECT * FROM social_media WHERE id=?',(row['media_id'],)).fetchone() if row['media_id'] else None
                 status['media']=media_public(media) if media else None;result.append(status)
         return result
@@ -242,18 +245,20 @@ def install(app,b,hooks):
         if not body.text.strip() and not body.media_id:raise HTTPException(400,'Write text or choose a photo, video or audio file')
         if body.background not in {'#82c9a9','#1f7a74','#7258a8','#b75e68','#bd893d','#263d59'} or body.font not in range(4):
             raise HTTPException(400,'Choose a supported status style')
+        if body.audience is not None and body.audience not in {'everyone','contacts','nobody'}:raise HTTPException(400,'Choose a supported audience')
         deadline=time.time()+86400
         name=b['auth_user'](token)['display_name']
         with db() as conn:
+            audience=body.audience or conn.execute('SELECT privacy FROM users WHERE id=?',(user,)).fetchone()['privacy']
             if body.media_id:
                 media=conn.execute("SELECT * FROM social_media WHERE id=? AND user_id=? AND purpose='status'",(body.media_id,user)).fetchone()
                 if not media or media['expires_at']<=time.time():raise HTTPException(400,'Upload your own status media first')
                 if conn.execute('SELECT 1 FROM statuses WHERE media_id=?',(body.media_id,)).fetchone():raise HTTPException(400,'This media has already been posted')
                 conn.execute('UPDATE social_media SET expires_at=? WHERE id=?',(deadline,body.media_id))
-            sid=conn.execute('INSERT INTO statuses(user_id,text,media_id,background,font,created_at,expires_at) VALUES(?,?,?,?,?,?,?)',(user,body.text.strip(),body.media_id,body.background,body.font,b['now_iso'](),deadline)).lastrowid
+            sid=conn.execute('INSERT INTO statuses(user_id,text,media_id,background,font,audience,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?)',(user,body.text.strip(),body.media_id,body.background,body.font,audience,b['now_iso'](),deadline)).lastrowid
             viewers=[r[0] for r in conn.execute('SELECT user_id FROM contacts WHERE contact_id=?',(user,))]
             for viewer in viewers:
-                if can_status(viewer,user,conn):alert(conn,viewer,'status',name,'New status update')
+                if can_status(viewer,user,conn,audience):alert(conn,viewer,'status',name,'New status update')
         for viewer in viewers:await b['mgr'].send_to_user(viewer,{'type':'notifications_changed'})
         return {'id':sid,'expires_at':deadline}
 
@@ -272,8 +277,8 @@ def install(app,b,hooks):
     def view_status(sid:int,token:str=Depends(b["session_token"])):
         viewer=uid(token)
         with db() as conn:
-            row=conn.execute('SELECT user_id FROM statuses WHERE id=? AND expires_at>?',(sid,time.time())).fetchone()
-            if not row or not can_status(viewer,row['user_id'],conn):raise HTTPException(404,'Status unavailable')
+            row=conn.execute('SELECT user_id,audience FROM statuses WHERE id=? AND expires_at>?',(sid,time.time())).fetchone()
+            if not row or not can_status(viewer,row['user_id'],conn,row['audience']):raise HTTPException(404,'Status unavailable')
             if viewer!=row['user_id']:
                 conn.execute('INSERT OR IGNORE INTO status_views(status_id,viewer_id,viewed_at) VALUES(?,?,?)',(sid,viewer,b['now_iso']()))
         return {'ok':True}
