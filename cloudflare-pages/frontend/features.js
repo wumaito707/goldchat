@@ -82,9 +82,9 @@ async function onChatChanged(cid) {
   }
 }
 function selectMainSection(section) {
-  const names={Chats:['desktopChats','mobileChats'],Updates:['desktopUpdates','mobileUpdates'],Calls:['desktopCalls','mobileCalls'],Channels:['desktopChannels','mobileCommunities'],Settings:['desktopSettings','mobileMore']};
-  document.querySelectorAll('.desktop-nav-item,.mobile-nav-item').forEach(button=>button.classList.remove('active'));
-  (names[section]||names.Chats).forEach(id=>document.getElementById(id)?.classList.add('active'));
+  const names={Chats:['desktopChats','mobileChats'],Updates:['desktopUpdates','mobileUpdates'],Communities:['desktopCommunities','mobileCommunities'],Calls:['desktopCalls','mobileCalls'],More:['desktopMore','mobileMore']};
+  document.querySelectorAll('.desktop-nav-item,.mobile-nav-item').forEach(button=>{button.classList.remove('active');button.removeAttribute('aria-current');});
+  (names[section]||names.Chats).forEach(id=>{const button=document.getElementById(id);button?.classList.add('active');button?.setAttribute('aria-current','page');});
 }
 function closePanel() {document.getElementById('modalRoot').innerHTML='';selectMainSection('Chats');}
 function panel(title, html, layout='dialog') {
@@ -127,22 +127,26 @@ composerInput.addEventListener('input',syncComposerActions);syncComposerActions(
 
 document.getElementById('featuresMenu').onclick=()=>{
   panel('More',`<div class="feature-grid">${action('profileMenu','Profile & privacy')}${action('contactsMenu','Contacts')}${action('starsMenu','Starred messages')}${action('themesMenu','Chat themes')}${action('settingsMenu','Settings & accessibility')}${action('channelMenu','Create channel')}${action('exportMenu','Export messages & contacts')}${action('blockedMenu','Blocked users')}${action('notificationsMenu','Notifications')}${action('linkedDevicesMenu','Linked devices')}${action('qrMenu','My QR & share')}${action('scanMenu','Scan code')}${action('callsMenu','Call history')}</div>`);
+  selectMainSection('More');
   bind('profileMenu',showProfile);bind('contactsMenu',showContacts);bind('starsMenu',showStars);bind('themesMenu',showChatThemes);bind('settingsMenu',showSettings);bind('channelMenu',()=>showGroup('channel'));bind('blockedMenu',showBlocks);bind('notificationsMenu',showNotificationInbox);bind('linkedDevicesMenu',showDevices);bind('qrMenu',showMyQR);bind('scanMenu',showScanner);bind('callsMenu',showCallHistory);
   bind('exportMenu',async()=>{downloadJSON(await request('/api/export'),'goldchat-export.json');toast('Export downloaded');});
 };
 document.getElementById('archiveToggle').onclick=()=>{showArchived=!showArchived;document.getElementById('archiveToggle').textContent=showArchived?'Active chats':'Archived';renderChatList();};
 document.getElementById('createGroup').onclick=()=>showGroup('group');
 document.getElementById('chatTools').onclick=showChatTools;
-document.getElementById('mobileChats')?.addEventListener('click',()=>document.getElementById('backBtn')?.click());
+function openChatsTab(){closePanel();chatListFilter='all';renderChatList();document.getElementById('sidebar').classList.remove('hidden');}
+function openCommunitiesTab(){showGroup('channel');selectMainSection('Communities');}
+function openMoreTab(){document.getElementById('featuresMenu')?.click();}
+document.getElementById('mobileChats')?.addEventListener('click',openChatsTab);
 document.getElementById('mobileUpdates')?.addEventListener('click',showUpdatesPage);
-document.getElementById('mobileCommunities')?.addEventListener('click',()=>showGroup('channel'));
+document.getElementById('mobileCommunities')?.addEventListener('click',openCommunitiesTab);
 document.getElementById('mobileCalls')?.addEventListener('click',()=>showCallHistory());
-document.getElementById('mobileMore')?.addEventListener('click',()=>document.getElementById('featuresMenu')?.click());
-document.getElementById('desktopChats')?.addEventListener('click',()=>{closePanel();chatListFilter='all';renderChatList();});
+document.getElementById('mobileMore')?.addEventListener('click',openMoreTab);
+document.getElementById('desktopChats')?.addEventListener('click',openChatsTab);
 document.getElementById('desktopUpdates')?.addEventListener('click',showUpdatesPage);
+document.getElementById('desktopCommunities')?.addEventListener('click',openCommunitiesTab);
 document.getElementById('desktopCalls')?.addEventListener('click',()=>showCallHistory());
-document.getElementById('desktopChannels')?.addEventListener('click',()=>{closePanel();chatListFilter='channel';renderChatList();selectMainSection('Channels');});
-document.getElementById('desktopSettings')?.addEventListener('click',()=>{showSettings();selectMainSection('Settings');});
+document.getElementById('desktopMore')?.addEventListener('click',openMoreTab);
 function chooseChatAttachment(accept,capture=false){
   closePanel();uploadInput.value='';uploadInput.accept=accept;
   if(capture)uploadInput.capture='environment';else uploadInput.removeAttribute('capture');

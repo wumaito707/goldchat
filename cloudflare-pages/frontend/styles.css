@@ -27,9 +27,9 @@ button { font-family: inherit; }
 
 .app { display: flex; height: 100vh; width: 100%; }
 .mobile-nav {display:none;}
-.desktop-nav {width:72px;flex:0 0 72px;display:flex;flex-direction:column;align-items:center;gap:8px;padding:18px 6px;background:var(--black-0);border-right:1px solid var(--black-3);}
-.desktop-nav-item {width:58px;min-height:58px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;border:0;border-radius:14px;background:transparent;color:var(--text-dim);cursor:pointer;}
-.desktop-nav-item span {font-size:23px;line-height:1.2;}.desktop-nav-item small {font-size:10px;}
+.desktop-nav {width:84px;flex:0 0 84px;display:flex;flex-direction:column;align-items:center;gap:8px;padding:18px 5px;background:var(--black-0);border-right:1px solid var(--black-3);}
+.desktop-nav-item {width:74px;min-height:62px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;border:0;border-radius:16px;background:transparent;color:var(--text-dim);cursor:pointer;}
+.desktop-nav-item span {font-size:23px;line-height:1.2;}.desktop-nav-item small {font-size:10.5px;font-weight:600;}
 .desktop-nav-item.active,.desktop-nav-item:hover {background:var(--gold-soft);color:var(--gold-bright);}
 .desktop-nav-bottom {margin-top:auto;}
 

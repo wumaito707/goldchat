@@ -8,7 +8,7 @@
 <meta name="theme-color" content="#d4af37">
 <link rel="manifest" href="/static/manifest.webmanifest">
 <link rel="apple-touch-icon" href="/static/icons/icon-192.png">
-<link rel="stylesheet" href="/static/styles.css?v=status-player-1">
+<link rel="stylesheet" href="/static/styles.css?v=desktop-phone-parity-1">
 </head>
 <body>
 
@@ -51,11 +51,11 @@
 <!-- ===== Main app ===== -->
 <div class="app" id="app" style="display:none">
   <nav class="desktop-nav" aria-label="Main navigation">
-    <button type="button" class="desktop-nav-item active" id="desktopChats" aria-label="Chats" title="Chats"><span aria-hidden="true">💬</span><small>Chats</small></button>
+    <button type="button" class="desktop-nav-item active" id="desktopChats" aria-label="Chats" aria-current="page" title="Chats"><span aria-hidden="true">💬</span><small>Chats</small></button>
     <button type="button" class="desktop-nav-item" id="desktopUpdates" aria-label="Updates" title="Updates"><span aria-hidden="true">◉</span><small>Updates</small></button>
+    <button type="button" class="desktop-nav-item" id="desktopCommunities" aria-label="Communities" title="Communities"><span aria-hidden="true">♧</span><small>Communities</small></button>
     <button type="button" class="desktop-nav-item" id="desktopCalls" aria-label="Calls" title="Calls"><span aria-hidden="true">☎</span><small>Calls</small></button>
-    <button type="button" class="desktop-nav-item" id="desktopChannels" aria-label="Channels" title="Channels"><span aria-hidden="true">▣</span><small>Channels</small></button>
-    <button type="button" class="desktop-nav-item desktop-nav-bottom" id="desktopSettings" aria-label="Settings" title="Settings"><span aria-hidden="true">⚙</span><small>Settings</small></button>
+    <button type="button" class="desktop-nav-item desktop-nav-bottom" id="desktopMore" aria-label="More" title="More"><span aria-hidden="true">⋮</span><small>More</small></button>
   </nav>
   <aside class="sidebar" id="sidebar">
     <div class="sidebar-header">
@@ -92,7 +92,7 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
     </button>
     <nav class="mobile-nav" aria-label="Mobile navigation">
-      <button type="button" class="mobile-nav-item active" id="mobileChats"><span aria-hidden="true">💬</span><span>Chats</span></button>
+      <button type="button" class="mobile-nav-item active" id="mobileChats" aria-current="page"><span aria-hidden="true">💬</span><span>Chats</span></button>
       <button type="button" class="mobile-nav-item" id="mobileUpdates"><span aria-hidden="true">◉</span><span>Updates</span></button>
       <button type="button" class="mobile-nav-item" id="mobileCommunities"><span aria-hidden="true">♧</span><span>Communities</span></button>
       <button type="button" class="mobile-nav-item" id="mobileCalls"><span aria-hidden="true">☎</span><span>Calls</span></button>
@@ -157,7 +157,7 @@
 <div id="modalRoot"></div>
 
 <script src="/static/app.js?v=fast-startup-1" defer></script>
-<script src="/static/features.js?v=status-audience-1" defer></script>
+<script src="/static/features.js?v=desktop-phone-parity-1" defer></script>
 <script src="/static/vendor/jsQR.js" defer></script>
 <script src="/static/social.js?v=status-audience-1" defer></script>
 <script src="/static/phone-permissions.js?v=1" defer></script>
