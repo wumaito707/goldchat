@@ -188,9 +188,7 @@ def install(app, b):
         for uid in ids:
             await manager.send_to_user(uid, event or {'type':'chat_changed','chat_id':cid})
 
-    @app.get('/api/v2/chats')
-    def chats(token: str = Depends(b["session_token"])):
-        uid=user(token)
+    def chats_for(uid):
         results=b['chat_list_for'](uid)
         with connection() as conn:
             preferences={r['id']:r for r in conn.execute('SELECT c.id,c.owner_id,c.disappearing_seconds,p.pinned,p.archived,p.muted FROM chats c JOIN chat_members cm ON cm.chat_id=c.id LEFT JOIN chat_preferences p ON p.chat_id=c.id AND p.user_id=cm.user_id WHERE cm.user_id=?',(uid,))}
@@ -204,6 +202,15 @@ def install(app, b):
                     chat['peer_online']=False
         conn.close()
         return sorted(results,key=lambda c:not c['pinned'])
+
+    @app.get('/api/v2/chats')
+    def chats(token: str = Depends(b["session_token"])):
+        return chats_for(user(token))
+
+    @app.get('/api/v2/bootstrap')
+    def bootstrap(token: str = Depends(b["session_token"])):
+        account=auth(token)
+        return {'user':public(account), 'chats':chats_for(account['id'])}
 
     @app.get('/api/v2/chats/{cid}/messages')
     def messages(cid: int, token: str = Depends(b["session_token"]), q: str = '', before: int | None = None):

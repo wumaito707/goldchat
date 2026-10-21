@@ -86,6 +86,13 @@ class StatusPresenceTest(unittest.TestCase):
         self.assertFalse(hidden['peer_online'])
         self.assertIsNone(hidden['peer_last_seen'])
 
+    def test_bootstrap_combines_profile_and_chats(self):
+        self.server.get_or_create_direct_chat(1, 2)
+        response = self.call(1, 'GET', '/api/v2/bootstrap')
+        self.assertEqual(response['user'], self.call(1, 'GET', '/api/me'))
+        self.assertEqual(response['chats'], self.call(1, 'GET', '/api/v2/chats'))
+        self.assertEqual(self.client.get('/api/v2/bootstrap').status_code, 401)
+
 
 if __name__ == '__main__':
     unittest.main()

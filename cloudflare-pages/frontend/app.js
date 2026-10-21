@@ -7,6 +7,7 @@ let chats = [];
 let activeChatId = null;
 let ws = null;
 let wsAlive = false;
+let wsConnectedBefore = false;
 let typingTimers = {};   // chat_id -> timeout (clear typing display)
 let peerTyping = {};     // chat_id -> bool
 let chatListFilter = 'all';
@@ -91,7 +92,7 @@ authForm.addEventListener('submit', async (e)=>{
 });
 
 /* ---------- Enter app ---------- */
-async function enterApp(){
+async function enterApp(initialChats=null){
   document.getElementById('meAvatar').textContent = ME.avatar_initial;
   document.getElementById('meAvatar').style.background = avatarStyle(ME.username);
   document.getElementById('meName').textContent = ME.display_name;
@@ -101,7 +102,12 @@ async function enterApp(){
   appEl.style.display = 'flex';
   // Conversations are the first thing people expect to see.  Start their
   // request immediately instead of waiting for the optional social widgets.
-  const chatsReady = loadChats();
+  const chatsReady = initialChats === null ? loadChats() : Promise.resolve();
+  if (initialChats !== null) {
+    chats = initialChats;
+    chatLoadState = 'ready';
+    renderChatList();
+  }
   try {
     // This establishes the private-media cookie used by the WebSocket and
     // uploaded media.  It can run while the conversation list is loading.
@@ -123,7 +129,10 @@ function connectWS(){
     wsAlive = true;
     document.getElementById('meStatus').textContent = 'Connected';
     if (activeChatId) { wsSend({type:'subscribe',chat_id:activeChatId}); refreshMessages(); }
-    loadChats();
+    // The initial chat list was already loaded during startup. Refresh only
+    // after a reconnect, when messages may have arrived while offline.
+    if (wsConnectedBefore) loadChats();
+    wsConnectedBefore = true;
   };
   ws.onmessage = (ev)=>{
     const data = JSON.parse(ev.data);
@@ -550,6 +559,7 @@ document.getElementById('logoutBtn').addEventListener('click', async ()=>{
   localStorage.removeItem('gc_token');
   localStorage.removeItem('gc_me');
   TOKEN = null; ME = null;
+  wsConnectedBefore = false;
   if (ws) ws.close();
   appEl.style.display = 'none';
   authWrap.style.display = 'flex';
@@ -560,10 +570,12 @@ document.getElementById('logoutBtn').addEventListener('click', async ()=>{
 async function bootstrap(){
   if (TOKEN){
     try {
-      const res = await fetch(`${API}/api/me`,{headers:{Authorization:"Bearer "+TOKEN}});
+      const res = await fetch(`${API}/api/v2/bootstrap`,{headers:{Authorization:"Bearer "+TOKEN}});
       if (res.ok){
-        ME = await res.json();
-        enterApp();
+        const data = await res.json();
+        if (!data.user || !Array.isArray(data.chats)) throw new Error('Invalid startup response');
+        ME = data.user;
+        enterApp(data.chats);
         return;
       } else { localStorage.removeItem('gc_token'); TOKEN=null; }
     } catch(e){ localStorage.removeItem('gc_token'); TOKEN=null; }
