@@ -329,6 +329,7 @@ def install(app, b):
             cids=[r['chat_id'] for r in conn.execute('SELECT chat_id FROM chat_members WHERE user_id=?',(uid,))]
         for cid in cids: await changed(cid)
         await manager.send_to_user(uid,{'type':'profile_changed'})
+        await manager.broadcast_presence(uid, bool(b['ONLINE'].get(uid)), row['last_seen_at'], include_hidden=True)
         return profile(row)
 
     @app.post('/api/contacts/match-phone')
@@ -530,7 +531,7 @@ def install(app, b):
             rows=conn.execute('''SELECT s.*,u.username,u.display_name,u.avatar_initial FROM statuses s JOIN users u ON u.id=s.user_id
             WHERE s.expires_at>? AND (s.user_id=? OR EXISTS(SELECT 1 FROM contacts c WHERE c.user_id=? AND c.contact_id=s.user_id))
             AND NOT EXISTS(SELECT 1 FROM blocks b WHERE (b.user_id=? AND b.blocked_id=s.user_id) OR (b.user_id=s.user_id AND b.blocked_id=?))
-            AND (s.user_id=? OR u.privacy='everyone' OR (u.privacy='contacts' AND EXISTS(SELECT 1 FROM contacts c WHERE c.user_id=s.user_id AND c.contact_id=?)))
+            AND (s.user_id=? OR COALESCE(s.audience,u.privacy)='everyone' OR (COALESCE(s.audience,u.privacy)='contacts' AND EXISTS(SELECT 1 FROM contacts c WHERE c.user_id=s.user_id AND c.contact_id=?)))
             ORDER BY s.id DESC''',(time.time(),uid,uid,uid,uid,uid,uid)).fetchall()
             result=[dict(r) for r in rows]
         conn.close(); return result
@@ -540,7 +541,8 @@ def install(app, b):
         uid=user(token)
         if not body.text.strip(): raise HTTPException(400,'Write a status')
         with connection() as conn:
-            sid=conn.execute('INSERT INTO statuses(user_id,text,created_at,expires_at) VALUES(?,?,?,?)',(uid,body.text.strip(),now(),time.time()+86400)).lastrowid
+            audience=conn.execute('SELECT privacy FROM users WHERE id=?',(uid,)).fetchone()['privacy']
+            sid=conn.execute('INSERT INTO statuses(user_id,text,audience,created_at,expires_at) VALUES(?,?,?,?,?)',(uid,body.text.strip(),audience,now(),time.time()+86400)).lastrowid
         conn.close(); return {'id':sid}
 
     @app.delete('/api/statuses/{sid}')
