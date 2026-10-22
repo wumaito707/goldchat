@@ -5,6 +5,7 @@ import json
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -54,6 +55,25 @@ class StatusPresenceTest(unittest.TestCase):
         response = self.client.request(method, path, headers={'Authorization': 'Bearer ' + self.tokens[uid]}, **kwargs)
         self.assertLess(response.status_code, 400, response.text)
         return response.json()
+
+    def test_google_signup_and_existing_email_protection(self):
+        from google.oauth2 import id_token
+        with patch.dict(os.environ, {'GOLDCHAT_GOOGLE_CLIENT_ID': 'test-web-client'}), patch.object(id_token, 'verify_oauth2_token') as verify:
+            verify.return_value={'sub':'google-test-123','email':'new-google-user@gmail.com','email_verified':True,'name':'Google User'}
+            created=self.client.post('/api/auth/google',json={'credential':'signed-test-token'})
+            self.assertEqual(created.status_code,200,created.text)
+            self.assertEqual(created.json()['user']['display_name'],'Google User')
+            self.assertEqual(self.client.post('/api/auth/google',json={'credential':'signed-test-token'}).json()['user']['id'],created.json()['user']['id'])
+            with self.db() as conn:
+                conn.execute('UPDATE users SET verified_email=? WHERE id=1',('existing@gmail.com',))
+            verify.return_value={'sub':'google-test-456','email':'existing@gmail.com','email_verified':True}
+            conflict=self.client.post('/api/auth/google',json={'credential':'another-signed-token'})
+            self.assertEqual(conflict.status_code,409)
+            linked=self.client.post('/api/auth/google',json={'credential':'another-signed-token'},headers={'Authorization':'Bearer '+self.tokens[1]})
+            self.assertEqual(linked.status_code,200,linked.text)
+            self.assertEqual(linked.json()['user']['id'],1)
+            verify.side_effect=ValueError('invalid signature')
+            self.assertEqual(self.client.post('/api/auth/google',json={'credential':'invalid'}).status_code,401)
 
     def test_status_audience_is_per_post_and_survives_profile_change(self):
         own = self.call(1, 'POST', '/api/social/statuses', json={'text': 'only me', 'audience': 'nobody'})['id']

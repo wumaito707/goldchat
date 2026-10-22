@@ -31,3 +31,5 @@ services:
         sync: false
       - key: GOLDCHAT_PAYSTACK_PAYMENT_LINK
         sync: false
+      - key: GOLDCHAT_GOOGLE_CLIENT_ID
+        sync: false

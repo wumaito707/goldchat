@@ -473,6 +473,9 @@ class LoginIn(BaseModel):
     username: str
     password: str
 
+class GoogleLoginIn(BaseModel):
+    credential: str
+
 def session_token(request: Request, token: str = Query("")):
     authorization=request.headers.get("authorization", "")
     if authorization.startswith("Bearer "):
@@ -521,6 +524,64 @@ def login(body: LoginIn):
         raise HTTPException(400, "Invalid username or password")
     token = create_session(row["id"])
     return {"user": user_public(row), "token": token}
+
+@app.get("/api/auth/google/config")
+def google_login_config():
+    return {"client_id": os.environ.get("GOLDCHAT_GOOGLE_CLIENT_ID", "").strip()}
+
+@app.post("/api/auth/google")
+def google_login(body: GoogleLoginIn, token: str = Depends(session_token)):
+    client_id = os.environ.get("GOLDCHAT_GOOGLE_CLIENT_ID", "").strip()
+    if not client_id:
+        raise HTTPException(503, "Google sign-in is not configured yet")
+    if len(body.credential) > 10000:
+        raise HTTPException(400, "Invalid Google sign-in")
+    try:
+        from google.oauth2 import id_token
+        from google.auth.transport import requests as google_requests
+        claims = id_token.verify_oauth2_token(body.credential, google_requests.Request(), client_id)
+    except Exception as exc:
+        logging.getLogger('uvicorn.error').info('Google ID token rejected: %s', type(exc).__name__)
+        raise HTTPException(401, "Google sign-in could not be verified") from None
+    sub = str(claims.get('sub') or '')
+    email = str(claims.get('email') or '').strip().lower()
+    if not sub or not email or claims.get('email_verified') not in (True, 'true'):
+        raise HTTPException(401, "Google account email must be verified")
+    conn = get_db(cleanup=False)
+    try:
+        existing = conn.execute('SELECT * FROM users WHERE google_sub=?', (sub,)).fetchone()
+        if existing:
+            if token and auth_user(token)['id'] != existing['id']:
+                raise HTTPException(409, 'This Google account is already connected to another GOLDCHAT account')
+            row = existing
+        else:
+            email_owner = conn.execute('SELECT * FROM users WHERE verified_email=?', (email,)).fetchone()
+            if email_owner:
+                # A matching email alone cannot silently attach a new login method.
+                if not token or auth_user(token)['id'] != email_owner['id']:
+                    raise HTTPException(409, 'This email already has a GOLDCHAT account. Sign in with your password first to connect Google.')
+                conn.execute('UPDATE users SET google_sub=? WHERE id=?', (sub, email_owner['id']))
+                conn.commit()
+                row = conn.execute('SELECT * FROM users WHERE id=?', (email_owner['id'],)).fetchone()
+            else:
+                if not (email.endswith('@gmail.com') or claims.get('hd')):
+                    raise HTTPException(400, 'Use email verification for non-Gmail accounts, then connect Google in Account settings')
+                display = str(claims.get('name') or email.split('@')[0]).strip()[:80] or 'Google user'
+                username = re.sub(r'[^A-Za-z0-9_]', '', email.split('@')[0])[:20] or 'user'
+                username = username if len(username) >= 3 else 'user'
+                username += '_' + secrets.token_hex(3)
+                password_hash, salt = hash_pw(secrets.token_urlsafe(48))
+                conn.execute('INSERT INTO users (username, display_name, password_hash, salt, avatar_initial, created_at, verified_email, verified_at, google_sub) VALUES (?,?,?,?,?,?,?,?,?)',
+                    (username, display, password_hash, salt, display[0].upper(), now_iso(), email, time.time(), sub))
+                conn.commit()
+                row = conn.execute('SELECT * FROM users WHERE google_sub=?', (sub,)).fetchone()
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        raise HTTPException(409, 'This Google account is already linked. Please try again.')
+    finally:
+        conn.close()
+    session = create_session(row['id'])
+    return {"user": user_public(row), "token": session}
 
 def create_session(uid, label="Browser"):
     token = secrets.token_hex(24)

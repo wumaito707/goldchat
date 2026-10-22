@@ -12,13 +12,14 @@ CODE_TTL_SECONDS = 3600
 
 def init_schema(conn):
     columns={r[1] for r in conn.execute('PRAGMA table_info(users)')}
-    for name,kind in [('verified_email','TEXT'),('verified_phone','TEXT'),('verified_at','REAL')]:
+    for name,kind in [('verified_email','TEXT'),('verified_phone','TEXT'),('verified_at','REAL'),('google_sub','TEXT')]:
         if name not in columns:conn.execute(f'ALTER TABLE users ADD COLUMN {name} {kind}')
     challenge_columns={r[1] for r in conn.execute('PRAGMA table_info(verification_challenges)')}
     if challenge_columns and 'reusable' not in challenge_columns:conn.execute('ALTER TABLE verification_challenges ADD COLUMN reusable INTEGER NOT NULL DEFAULT 0')
     conn.executescript('''
     CREATE UNIQUE INDEX IF NOT EXISTS verified_email_unique ON users(verified_email);
     CREATE UNIQUE INDEX IF NOT EXISTS verified_phone_unique ON users(verified_phone);
+    CREATE UNIQUE INDEX IF NOT EXISTS google_sub_unique ON users(google_sub);
     CREATE TABLE IF NOT EXISTS verification_challenges (
       id TEXT PRIMARY KEY, purpose TEXT NOT NULL, channel TEXT NOT NULL, address TEXT NOT NULL,
       user_id INTEGER, code_hash TEXT NOT NULL, created_at REAL NOT NULL, expires_at REAL NOT NULL,
