@@ -526,13 +526,20 @@ def login(body: LoginIn):
     token = create_session(row["id"])
     return {"user": user_public(row), "token": token}
 
+# OAuth web client IDs are public identifiers. Keep the browser and token
+# verifier on the same configured audience; deployments may override this ID.
+GOOGLE_WEB_CLIENT_ID = "156129903526-hti8fajob4du8gqnva6sdnuji3kjr9mi.apps.googleusercontent.com"
+
+def google_client_id():
+    return os.environ.get("GOLDCHAT_GOOGLE_CLIENT_ID", "").strip() or GOOGLE_WEB_CLIENT_ID
+
 @app.get("/api/auth/google/config")
 def google_login_config():
-    return {"client_id": os.environ.get("GOLDCHAT_GOOGLE_CLIENT_ID", "").strip()}
+    return {"client_id": google_client_id()}
 
 @app.post("/api/auth/google")
 def google_login(body: GoogleLoginIn, token: str = Depends(session_token)):
-    client_id = os.environ.get("GOLDCHAT_GOOGLE_CLIENT_ID", "").strip()
+    client_id = google_client_id()
     if not client_id:
         raise HTTPException(503, "Google sign-in is not configured yet")
     if len(body.credential) > 10000:

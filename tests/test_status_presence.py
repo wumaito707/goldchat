@@ -56,11 +56,20 @@ class StatusPresenceTest(unittest.TestCase):
         self.assertLess(response.status_code, 400, response.text)
         return response.json()
 
+    def test_google_configuration_uses_the_deployed_public_id_and_environment_override(self):
+        with patch.dict(os.environ, {'GOLDCHAT_GOOGLE_CLIENT_ID': ''}):
+            response=self.client.get('/api/auth/google/config')
+            self.assertEqual(response.status_code,200)
+            self.assertEqual(response.json()['client_id'],self.server.GOOGLE_WEB_CLIENT_ID)
+        with patch.dict(os.environ, {'GOLDCHAT_GOOGLE_CLIENT_ID': 'overridden-client.apps.googleusercontent.com'}):
+            self.assertEqual(self.client.get('/api/auth/google/config').json()['client_id'],'overridden-client.apps.googleusercontent.com')
+
     def test_google_signup_and_existing_email_protection(self):
         from google.oauth2 import id_token
         with patch.dict(os.environ, {'GOLDCHAT_GOOGLE_CLIENT_ID': 'test-web-client'}), patch.object(id_token, 'verify_oauth2_token') as verify:
             verify.return_value={'sub':'google-test-123','email':'new-google-user@gmail.com','email_verified':True,'name':'Google User'}
             created=self.client.post('/api/auth/google',json={'credential':'signed-test-token'})
+            self.assertEqual(verify.call_args.args[2],'test-web-client')
             self.assertEqual(created.status_code,200,created.text)
             self.assertEqual(created.json()['user']['display_name'],'Google User')
             self.assertEqual(self.client.post('/api/auth/google',json={'credential':'signed-test-token'}).json()['user']['id'],created.json()['user']['id'])

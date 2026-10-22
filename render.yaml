@@ -32,4 +32,4 @@ services:
       - key: GOLDCHAT_PAYSTACK_PAYMENT_LINK
         sync: false
       - key: GOLDCHAT_GOOGLE_CLIENT_ID
-        sync: false
+        value: 156129903526-hti8fajob4du8gqnva6sdnuji3kjr9mi.apps.googleusercontent.com
