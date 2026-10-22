@@ -19,6 +19,8 @@ def init_schema(conn):
     for table, column, definition in [
         ('users', 'bio', "TEXT NOT NULL DEFAULT ''"),
         ('users', 'privacy', "TEXT NOT NULL DEFAULT 'contacts'"),
+        ('users', 'read_receipts', 'INTEGER NOT NULL DEFAULT 1'),
+        ('read_state', 'last_delivered_msg_id', 'INTEGER NOT NULL DEFAULT 0'),
         ('chats', 'owner_id', 'INTEGER'),
         ('messages', 'edited_at', 'TEXT'),
         ('messages', 'deleted', 'INTEGER NOT NULL DEFAULT 0'),
@@ -66,6 +68,7 @@ class ProfileIn(BaseModel):
     display_name: str = Field(min_length=1, max_length=80)
     bio: str = Field(default='', max_length=280)
     privacy: str = 'contacts'
+    read_receipts: bool | None = None
 
 class MessageIn(BaseModel):
     text: str = Field(default='', max_length=10000)
@@ -136,7 +139,7 @@ def install(app, b):
         return auth(token)['id']
 
     def profile(row):
-        return {**public(row), 'bio': row['bio'], 'privacy': row['privacy']}
+        return {**public(row), 'bio': row['bio'], 'privacy': row['privacy'], 'read_receipts': bool(row['read_receipts'])}
 
     def message_row(mid, uid):
         with connection() as conn:
@@ -167,7 +170,10 @@ def install(app, b):
             starred = bool(conn.execute('SELECT 1 FROM stars WHERE message_id=? AND user_id=?', (row['id'],uid)).fetchone())
             attachment = conn.execute('SELECT id,name,mime,size FROM attachments WHERE id=?', (row['attachment_id'],)).fetchone() if row['attachment_id'] and not row['deleted'] else None
             reply = conn.execute('SELECT id,text,deleted FROM messages WHERE id=?', (row['reply_to'],)).fetchone() if row['reply_to'] else None
-            read = conn.execute('SELECT MIN(COALESCE(rs.last_read_msg_id,0)) AS n FROM chat_members cm LEFT JOIN read_state rs ON rs.chat_id=cm.chat_id AND rs.user_id=cm.user_id WHERE cm.chat_id=? AND cm.user_id!=?', (row['chat_id'],uid)).fetchone()['n']
+            receipt=b['chat_receipt_state'](conn,row['chat_id'],uid)
+            read=receipt['read']
+            delivered=receipt['delivered']
+            readable=receipt['readable']
         else:
             sender=cached['senders'][row['sender_id']]
             reacts=cached['reactions'].get(row['id'],[])
@@ -175,8 +181,12 @@ def install(app, b):
             attachment=cached['attachments'].get(row['attachment_id']) if not row['deleted'] else None
             reply=cached['replies'].get(row['reply_to'])
             read=cached['read']
+            delivered=cached['delivered']
+            readable=cached['readable']
         return {'id':row['id'], 'chat_id':row['chat_id'], 'sender':public(sender), 'text':'Message deleted' if row['deleted'] else row['text'],
-            'time':b['fmt_time'](row['created_at']), 'iso':row['created_at'], 'mine':row['sender_id']==uid, 'read':bool(read and read>=row['id']),
+            'time':b['fmt_time'](row['created_at']), 'iso':row['created_at'], 'mine':row['sender_id']==uid,
+            'read':bool(row['sender_id']==uid and readable and read>=row['id']),
+            'delivered':bool(row['sender_id']==uid and delivered>=row['id']),
             'expires_at':row['expires_at'], 'forwarded':bool(row['forwarded']), 'edited':bool(row['edited_at']), 'deleted':bool(row['deleted']), 'attachment':dict(attachment) if attachment else None,
             'reply':{'id':reply['id'],'text':'Message deleted' if reply['deleted'] else reply['text']} if reply else None,
             'reactions':[dict(r) for r in reacts], 'starred':starred}
@@ -184,9 +194,16 @@ def install(app, b):
     async def changed(cid, event=None):
         with connection() as conn:
             ids=[r['user_id'] for r in conn.execute('SELECT user_id FROM chat_members WHERE chat_id=?',(cid,))]
+            latest=conn.execute('SELECT id,sender_id FROM messages WHERE chat_id=? ORDER BY id DESC LIMIT 1',(cid,)).fetchone()
         conn.close()
+        delivered=False
         for uid in ids:
-            await manager.send_to_user(uid, event or {'type':'chat_changed','chat_id':cid})
+            sent=await manager.send_to_user(uid, event or {'type':'chat_changed','chat_id':cid})
+            if sent and latest and uid!=latest['sender_id']:
+                delivered=bool(b['advance_delivery'](uid,cid,latest['id'])) or delivered
+        if delivered:
+            for uid in ids:
+                await manager.send_to_user(uid, {'type':'delivery','chat_ids':[cid]})
 
     def chats_for(uid):
         results=b['chat_list_for'](uid)
@@ -231,7 +248,8 @@ def install(app, b):
                 'replies':{r['id']:r for r in related('messages','id',[r['reply_to'] for r in rows],'id,text,deleted')},
                 'stars':{r['message_id'] for r in related('stars','message_id',[r['id'] for r in rows],'message_id','AND user_id=?',(uid,))},
                 'reactions':reactions,
-                'read':conn.execute('SELECT MIN(COALESCE(rs.last_read_msg_id,0)) AS n FROM chat_members cm LEFT JOIN read_state rs ON rs.chat_id=cm.chat_id AND rs.user_id=cm.user_id WHERE cm.chat_id=? AND cm.user_id!=?',(cid,uid)).fetchone()['n']}
+            }
+            cached.update(b['chat_receipt_state'](conn,cid,uid))
             result=[detail(r,uid,conn,cached) for r in reversed(rows)]
         conn.close()
         return result
@@ -321,7 +339,10 @@ def install(app, b):
 
     @app.get('/api/profile')
     def get_profile(token:str=Depends(b["session_token"])):
-        return profile(auth(token))
+        uid=user(token)
+        with connection() as conn:
+            row=conn.execute('SELECT * FROM users WHERE id=?',(uid,)).fetchone()
+        return profile(row)
 
     @app.patch('/api/profile')
     async def save_profile(body:ProfileIn, token:str=Depends(b["session_token"])):
@@ -329,7 +350,10 @@ def install(app, b):
         if not body.display_name.strip() or body.privacy not in {'everyone','contacts','nobody'}:
             raise HTTPException(400,'Invalid profile settings')
         with connection() as conn:
-            conn.execute('UPDATE users SET display_name=?,avatar_initial=?,bio=?,privacy=? WHERE id=?',(body.display_name.strip(),body.display_name.strip()[0].upper(),body.bio,body.privacy,uid))
+            conn.execute('''UPDATE users SET display_name=?,avatar_initial=?,bio=?,privacy=?,
+                read_receipts=COALESCE(?,read_receipts) WHERE id=?''',
+                (body.display_name.strip(),body.display_name.strip()[0].upper(),body.bio,body.privacy,
+                 int(body.read_receipts) if body.read_receipts is not None else None,uid))
             row=conn.execute('SELECT * FROM users WHERE id=?',(uid,)).fetchone()
         conn.close()
         with connection() as conn:

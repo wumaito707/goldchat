@@ -1,6 +1,7 @@
 """Regression checks for per-post status privacy and chat presence."""
 import os
 import gc
+import json
 import tempfile
 import time
 import unittest
@@ -32,13 +33,13 @@ class StatusPresenceTest(unittest.TestCase):
         cls.server = server
         server.init_db()
         with cls.db() as conn:
-            for name in ('author', 'viewer', 'other'):
+            for name in ('author', 'viewer', 'other', 'sender', 'recipient'):
                 conn.execute('INSERT INTO users(username,display_name,password_hash,salt,avatar_initial,created_at) VALUES(?,?,?,?,?,?)',
                              (name, name.title(), 'unused', 'unused', name[0].upper(), server.now_iso()))
             conn.execute('INSERT INTO contacts(user_id,contact_id) VALUES(2,1)')
             conn.execute('INSERT INTO contacts(user_id,contact_id) VALUES(3,1)')
             conn.execute('INSERT INTO contacts(user_id,contact_id) VALUES(1,2)')
-        cls.tokens = {uid: server.create_session(uid) for uid in (1, 2, 3)}
+        cls.tokens = {uid: server.create_session(uid) for uid in (1, 2, 3, 4, 5)}
         cls.client = TestClient(server.app)
 
     @classmethod
@@ -92,6 +93,69 @@ class StatusPresenceTest(unittest.TestCase):
         self.assertEqual(response['user'], self.call(1, 'GET', '/api/me'))
         self.assertEqual(response['chats'], self.call(1, 'GET', '/api/v2/chats'))
         self.assertEqual(self.client.get('/api/v2/bootstrap').status_code, 401)
+
+    def test_message_receipts_follow_delivery_read_and_privacy(self):
+        server = self.server
+        cid = server.get_or_create_direct_chat(4, 5)
+        with self.db() as conn:
+            conn.execute("UPDATE users SET privacy='everyone',read_receipts=1 WHERE id=5")
+        sent = self.call(4, 'POST', f'/api/chats/{cid}/messages', json={'text': 'Receipt test'})
+        mid = sent['id']
+
+        def own_message(path):
+            return next(m for m in self.call(4, 'GET', path) if m['id'] == mid)
+
+        def home_message():
+            return next(c for c in self.call(4, 'GET', '/api/v2/chats') if c['id'] == cid)['last_message']
+
+        for row in (own_message(f'/api/v2/chats/{cid}/messages'), own_message(f'/api/chats/{cid}/messages'), home_message()):
+            self.assertFalse(row['delivered'])
+            self.assertFalse(row['read'])
+
+        self.assertEqual(server.advance_delivery(5, cid), {cid})
+        for row in (own_message(f'/api/v2/chats/{cid}/messages'), home_message()):
+            self.assertTrue(row['delivered'])
+            self.assertFalse(row['read'])
+        self.assertEqual(server.advance_delivery(5, cid), set())
+
+        self.call(5, 'POST', f'/api/chats/{cid}/read')
+        for row in (own_message(f'/api/v2/chats/{cid}/messages'), own_message(f'/api/chats/{cid}/messages'), home_message()):
+            self.assertTrue(row['delivered'])
+            self.assertTrue(row['read'])
+
+        self.call(5, 'PATCH', '/api/profile', json={'display_name': 'Recipient', 'bio': '', 'privacy': 'everyone', 'read_receipts': False})
+        self.assertFalse(own_message(f'/api/v2/chats/{cid}/messages')['read'])
+        self.assertFalse(home_message()['read'])
+        self.call(5, 'PATCH', '/api/profile', json={'display_name': 'Recipient', 'bio': '', 'privacy': 'nobody', 'read_receipts': True})
+        self.assertFalse(own_message(f'/api/chats/{cid}/messages')['read'])
+        self.assertFalse(home_message()['read'])
+
+    def test_online_recipient_gets_persisted_delivery(self):
+        server = self.server
+        cid = server.get_or_create_direct_chat(4, 5)
+
+        class FakeSocket:
+            def __init__(self):
+                self.events = []
+
+            async def send_text(self, data):
+                self.events.append(json.loads(data))
+
+        socket = FakeSocket()
+        ws_id = 'receipt-test-recipient'
+        server.ONLINE.setdefault(5, set()).add(ws_id)
+        server.mgr.active[ws_id] = {'user_id': 5, 'ws': socket, 'chat_ids': set()}
+        try:
+            mid = self.call(4, 'POST', f'/api/chats/{cid}/messages', json={'text': 'Online delivery'})['id']
+            message = next(m for m in self.call(4, 'GET', f'/api/v2/chats/{cid}/messages') if m['id'] == mid)
+            self.assertTrue(message['delivered'])
+            self.assertFalse(message['read'])
+            self.assertTrue(any(event['type'] == 'chat_changed' for event in socket.events))
+        finally:
+            server.mgr.active.pop(ws_id, None)
+            server.ONLINE.get(5, set()).discard(ws_id)
+            if not server.ONLINE.get(5):
+                server.ONLINE.pop(5, None)
 
 
 if __name__ == '__main__':

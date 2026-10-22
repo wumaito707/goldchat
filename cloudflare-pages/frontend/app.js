@@ -194,6 +194,10 @@ function handleWSEvent(d){
     loadChats();
     if (d.chat_id === activeChatId && d.user_id !== ME.id) refreshMessages();
   }
+  else if (d.type === 'delivery'){
+    loadChats();
+    if (activeChatId && d.chat_ids?.some(id=>conversationIds(activeChatId).includes(id))) refreshMessages();
+  }
   else if (d.type === 'presence'){
     const chat = chats.find(c=> c.peer && c.peer.id===d.user_id);
     if (chat){ chat.peer_online = d.online; chat.peer_last_seen = d.online ? null : d.last_seen; renderChatList(); if (d.user_id === getPeerId(activeChatId)) updateHeaderStatus(); }
@@ -266,7 +270,7 @@ function renderChatList(){
     const el = document.createElement('div');
     el.className = 'chat-item' + (c.id===activeChatId ? ' active' : '');
     const last = c.last_message || {};
-    const preview = last.sender_id === ME.id ? receiptMarkup(last.read)+' <span class="you-prefix">You: </span>' : '';
+    const preview = last.sender_id === ME.id ? receiptMarkup(last.read,last.delivered)+' <span class="you-prefix">You: </span>' : '';
     const typingTag = c._typingPreview ? `<span style="color:var(--green)">typing…</span>` : `${preview}${escapeHtml(last.text||'')}`;
     const timeTag = last.iso ? fmtTime(last.iso) : (last.time || '');
     el.innerHTML = `
@@ -364,7 +368,7 @@ function appendMessage(m){
   wrap.className = 'msg ' + (m.mine ? 'sent' : 'recv');
   wrap.dataset.id = m.id || '';
   if(m.expires_at){wrap.dataset.expires=m.expires_at;wrap.title='Disappears '+new Date(m.expires_at*1000).toLocaleString();}
-  const checks = m.mine ? receiptMarkup(m.read) : '';
+  const checks = m.mine ? receiptMarkup(m.read,m.delivered) : '';
   const who = (!m.mine && chats.find(c=>c.id===activeChatId)?.type !== 'direct') ? '<strong class="sender-name">'+escapeHtml(m.sender.display_name)+'</strong>' : ''; 
   const reply = m.reply ? `<div class="reply-preview">↪ ${escapeHtml(m.reply.text.slice(0,100))}</div>` : '';
   const file = attachmentMarkup(m.attachment,m);
@@ -429,10 +433,7 @@ function removeTypingBubble(){
   if (tb) tb.remove();
 }
 
-function receiptMarkup(read){return `<span class="check${read?' read-receipt':''}" title="${read?'Read':'Sent'}" aria-label="${read?'Read':'Sent'}">&#10003;&#10003;</span>`;}
-function markSentMessagesRead(){
-  document.querySelectorAll('.msg.sent .meta .check').forEach(c=>{ c.textContent='✓✓'; });
-}
+function receiptMarkup(read,delivered){const state=read?'Read':delivered?'Delivered':'Sent';return `<span class="check${read?' read-receipt':''}" title="${state}" aria-label="${state}">${read||delivered?'&#10003;&#10003;':'&#10003;'}</span>`;}
 
 /* ---------- Send message ---------- */
 const composerInput = document.getElementById('composerInput');

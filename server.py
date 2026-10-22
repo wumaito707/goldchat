@@ -193,6 +193,21 @@ class ConnectionManager:
     async def connect(self, ws_id, user_id, ws):
         self.active[ws_id] = {"user_id": user_id, "ws": ws, "chat_ids": set()}
         ONLINE.setdefault(user_id, set()).add(ws_id)
+        delivered_chats = advance_delivery(user_id)
+        if delivered_chats:
+            conn = get_db(cleanup=False)
+            try:
+                peers = conn.execute("""SELECT cm2.chat_id,cm2.user_id FROM chat_members cm1
+                    JOIN chat_members cm2 ON cm1.chat_id=cm2.chat_id
+                    WHERE cm1.user_id=? AND cm2.user_id!=?""", (user_id,user_id)).fetchall()
+            finally:
+                conn.close()
+            recipients = {}
+            for row in peers:
+                if row['chat_id'] in delivered_chats:
+                    recipients.setdefault(row['user_id'], []).append(row['chat_id'])
+            for peer_id, chat_ids in recipients.items():
+                await self.send_to_user(peer_id, {"type":"delivery", "chat_ids":chat_ids})
         await self.broadcast_presence(user_id, True)
 
     def disconnect(self, ws_id):
@@ -221,13 +236,16 @@ class ConnectionManager:
         SUBSCRIBED.setdefault(chat_id, set()).add(ws_id)
 
     async def send_to_user(self, user_id, data):
+        sent = False
         for ws_id in list(ONLINE.get(user_id, set())):
             info = self.active.get(ws_id)
             if info:
                 try:
                     await info["ws"].send_text(json.dumps(data))
+                    sent = True
                 except Exception:
                     self.disconnect(ws_id)
+        return sent
 
     async def broadcast_chat(self, chat_id, data, exclude_ws=None):
         for ws_id in list(SUBSCRIBED.get(chat_id, set())):
@@ -281,6 +299,62 @@ def presence_visible(subject_id, observer_id):
     conn.close()
     return bool(subject and not blocked and (subject['privacy']=='everyone' or (subject['privacy']=='contacts' and contact)))
 
+def read_receipts_visible(subject_id, observer_id, conn):
+    """Whether an observer may learn that this user read a message."""
+    if subject_id == observer_id:
+        return True
+    row = conn.execute("""SELECT u.privacy,u.read_receipts,
+        EXISTS(SELECT 1 FROM contacts WHERE user_id=? AND contact_id=?) AS contact,
+        EXISTS(SELECT 1 FROM blocks WHERE (user_id=? AND blocked_id=?) OR (user_id=? AND blocked_id=?)) AS blocked
+        FROM users u WHERE u.id=?""",
+        (subject_id,observer_id,subject_id,observer_id,observer_id,subject_id,subject_id)).fetchone()
+    return bool(row and row['read_receipts'] and not row['blocked']
+                and (row['privacy']=='everyone' or (row['privacy']=='contacts' and row['contact'])))
+
+def advance_delivery(user_id, chat_id=None, message_id=None):
+    """Persist delivery once a user's socket can receive messages; never regress it."""
+    conn = get_db(cleanup=False)
+    try:
+        rows = conn.execute("""SELECT cm.chat_id,
+            (SELECT MAX(id) FROM messages WHERE chat_id=cm.chat_id) AS newest,
+            COALESCE(rs.last_delivered_msg_id,0) AS delivered
+            FROM chat_members cm LEFT JOIN read_state rs
+            ON rs.chat_id=cm.chat_id AND rs.user_id=cm.user_id
+            WHERE cm.user_id=? AND (? IS NULL OR cm.chat_id=?)""",
+            (user_id,chat_id,chat_id)).fetchall()
+        changed = set()
+        for row in rows:
+            newest = message_id if message_id is not None else row['newest']
+            if newest and newest > row['delivered']:
+                conn.execute("""INSERT INTO read_state(chat_id,user_id,last_delivered_msg_id)
+                    VALUES(?,?,?) ON CONFLICT(chat_id,user_id) DO UPDATE SET
+                    last_delivered_msg_id=MAX(read_state.last_delivered_msg_id,excluded.last_delivered_msg_id)""",
+                    (row['chat_id'],user_id,newest))
+                changed.add(row['chat_id'])
+        conn.commit()
+        return changed
+    finally:
+        conn.close()
+
+def chat_receipt_state(conn, chat_id, observer_id):
+    """Read all peer receipt watermarks and privacy in one database request."""
+    peers = conn.execute("""SELECT cm.user_id,COALESCE(rs.last_read_msg_id,0) AS read_id,
+        MAX(COALESCE(rs.last_delivered_msg_id,0),COALESCE(rs.last_read_msg_id,0)) AS delivered_id,
+        u.privacy,u.read_receipts,
+        EXISTS(SELECT 1 FROM contacts c WHERE c.user_id=u.id AND c.contact_id=?) AS receipt_contact,
+        EXISTS(SELECT 1 FROM blocks b WHERE (b.user_id=u.id AND b.blocked_id=?) OR (b.user_id=? AND b.blocked_id=u.id)) AS receipt_blocked
+        FROM chat_members cm JOIN users u ON u.id=cm.user_id
+        LEFT JOIN read_state rs ON rs.chat_id=cm.chat_id AND rs.user_id=cm.user_id
+        WHERE cm.chat_id=? AND cm.user_id!=?""",
+        (observer_id,observer_id,observer_id,chat_id,observer_id)).fetchall()
+    return {
+        'read': min((peer['read_id'] for peer in peers), default=0),
+        'delivered': min((peer['delivered_id'] for peer in peers), default=0),
+        'readable': bool(peers and all(peer['read_receipts'] and not peer['receipt_blocked'] and
+            (peer['privacy']=='everyone' or (peer['privacy']=='contacts' and peer['receipt_contact']))
+            for peer in peers)),
+    }
+
 
 def user_public(row):
     return {
@@ -319,10 +393,15 @@ def chat_list_for(user_id):
     conn = get_db()
     queries=[
         ('\n        SELECT c.*, (SELECT COUNT(*) FROM messages m WHERE m.chat_id=c.id) AS msg_count\n        FROM chats c\n        JOIN chat_members cm ON cm.chat_id=c.id\n        WHERE cm.user_id=?\n        ORDER BY (SELECT MAX(created_at) FROM messages m WHERE m.chat_id=c.id) DESC\n    ',(user_id,)),
-        ('SELECT cm.chat_id,u.* FROM chat_members cm JOIN users u ON u.id=cm.user_id WHERE cm.user_id!=? AND cm.chat_id IN (SELECT chat_id FROM chat_members WHERE user_id=?)',(user_id, user_id)),
+        ('''SELECT cm.chat_id,u.*,
+            EXISTS(SELECT 1 FROM contacts c WHERE c.user_id=u.id AND c.contact_id=?) AS receipt_contact,
+            EXISTS(SELECT 1 FROM blocks b WHERE (b.user_id=u.id AND b.blocked_id=?) OR (b.user_id=? AND b.blocked_id=u.id)) AS receipt_blocked
+            FROM chat_members cm JOIN users u ON u.id=cm.user_id
+            WHERE cm.user_id!=? AND cm.chat_id IN (SELECT chat_id FROM chat_members WHERE user_id=?)''',
+            (user_id,user_id,user_id,user_id,user_id)),
         ('SELECT m.* FROM messages m WHERE m.id=(SELECT MAX(m2.id) FROM messages m2 WHERE m2.chat_id=m.chat_id AND NOT EXISTS(SELECT 1 FROM message_hidden h WHERE h.message_id=m2.id AND h.user_id=?)) AND m.chat_id IN (SELECT chat_id FROM chat_members WHERE user_id=?)',(user_id, user_id)),
         ('SELECT m.chat_id,COUNT(*) AS n FROM messages m JOIN chat_members cm ON cm.chat_id=m.chat_id AND cm.user_id=? LEFT JOIN read_state rs ON rs.chat_id=m.chat_id AND rs.user_id=? WHERE m.sender_id!=? AND m.id>COALESCE(rs.last_read_msg_id,0) GROUP BY m.chat_id',(user_id, user_id, user_id)),
-        ('SELECT cm.chat_id,MIN(COALESCE(rs.last_read_msg_id,0)) AS n FROM chat_members cm LEFT JOIN read_state rs ON rs.chat_id=cm.chat_id AND rs.user_id=cm.user_id WHERE cm.user_id!=? AND cm.chat_id IN (SELECT chat_id FROM chat_members WHERE user_id=?) GROUP BY cm.chat_id',(user_id, user_id))
+        ('SELECT cm.chat_id,MIN(COALESCE(rs.last_read_msg_id,0)) AS read_id,MIN(MAX(COALESCE(rs.last_delivered_msg_id,0),COALESCE(rs.last_read_msg_id,0))) AS delivered_id FROM chat_members cm LEFT JOIN read_state rs ON rs.chat_id=cm.chat_id AND rs.user_id=cm.user_id WHERE cm.user_id!=? AND cm.chat_id IN (SELECT chat_id FROM chat_members WHERE user_id=?) GROUP BY cm.chat_id',(user_id, user_id))
     ]
     data=conn.query_batch(queries) if hasattr(conn,"query_batch") else [conn.execute(sql,args).fetchall() for sql,args in queries]
     rows=data[0]
@@ -330,21 +409,26 @@ def chat_list_for(user_id):
     for m in data[1]:memberships.setdefault(m["chat_id"],[]).append(m)
     last_messages={r["chat_id"]:r for r in data[2]}
     unread_counts={r["chat_id"]:r["n"] for r in data[3]}
-    peer_reads={r["chat_id"]:r["n"] for r in data[4]}
+    peer_reads={r["chat_id"]:r for r in data[4]}
     out = []
     for r in rows:
         members=memberships.get(r['id'],[])
         last=last_messages.get(r['id'])
         unread=unread_counts.get(r['id'],0)
         peer=members[0] if members else None
-        peer_read=peer_reads.get(r['id'])
+        receipt=peer_reads.get(r['id'])
+        receipt_visible=bool(last and last['sender_id']==user_id and members and all(
+            m['read_receipts'] and not m['receipt_blocked'] and
+            (m['privacy']=='everyone' or (m['privacy']=='contacts' and m['receipt_contact']))
+            for m in members))
         out.append({
             "id": r["id"], "type": r["type"], "title": r["title"],
             "peer": user_public(peer) if peer else None,
             "members": [user_public(m) for m in members],
             "last_message": {
                 "id": last["id"] if last else None,
-                "read": bool(last and peer_read and peer_read>=last['id']),
+                "read": bool(receipt_visible and receipt and receipt['read_id']>=last['id']),
+                "delivered": bool(last and last['sender_id']==user_id and receipt and (receipt['delivered_id'] or 0)>=last['id']),
                 "text": last["text"] if last else "",
                 "sender_id": last["sender_id"] if last else None,
                 "time": fmt_time(last["created_at"]) if last else "",
@@ -361,8 +445,7 @@ def messages_for(chat_id, user_id, limit=200):
     conn = get_db()
     msgs = conn.execute("SELECT * FROM messages WHERE chat_id=? AND NOT EXISTS(SELECT 1 FROM message_hidden h WHERE h.message_id=messages.id AND h.user_id=?) ORDER BY id DESC LIMIT ?", (chat_id,user_id, limit)).fetchall()
     msgs = list(reversed(msgs))
-    rs = conn.execute("SELECT last_read_msg_id FROM read_state WHERE chat_id=? AND user_id=?", (chat_id, user_id)).fetchone()
-    last_read = rs["last_read_msg_id"] if rs else 0
+    receipt = chat_receipt_state(conn,chat_id,user_id)
     out = []
     for m in msgs:
         sender = conn.execute("SELECT id, username, display_name, avatar_initial, avatar_media_id FROM users WHERE id=?", (m["sender_id"],)).fetchone()
@@ -373,7 +456,8 @@ def messages_for(chat_id, user_id, limit=200):
             "time": fmt_time(m["created_at"]),
             "iso": m["created_at"],
             "mine": m["sender_id"] == user_id,
-            "read": m["id"] <= last_read,
+            "read": bool(m['sender_id']==user_id and receipt['readable'] and receipt['read']>=m['id']),
+            "delivered": bool(m['sender_id']==user_id and receipt['delivered']>=m['id']),
         })
     conn.close()
     return out
@@ -543,18 +627,28 @@ async def mark_read(chat_id: int, token: str = Depends(session_token)):
     conn = get_db()
     last = conn.execute("SELECT MAX(id) AS m FROM messages WHERE chat_id=?", (chat_id,)).fetchone()
     last_id = last["m"] or 0
+    previous=conn.execute("SELECT last_read_msg_id,last_delivered_msg_id FROM read_state WHERE chat_id=? AND user_id=?",(chat_id,u['id'])).fetchone()
+    previous_read=previous['last_read_msg_id'] if previous else 0
+    previous_delivery=previous['last_delivered_msg_id'] if previous else 0
     conn.execute("""
-        INSERT INTO read_state (chat_id, user_id, last_read_msg_id) VALUES (?,?,?)
-        ON CONFLICT(chat_id, user_id) DO UPDATE SET last_read_msg_id=excluded.last_read_msg_id
-    """, (chat_id, u["id"], last_id))
+        INSERT INTO read_state (chat_id, user_id, last_read_msg_id,last_delivered_msg_id) VALUES (?,?,?,?)
+        ON CONFLICT(chat_id, user_id) DO UPDATE SET
+        last_read_msg_id=MAX(read_state.last_read_msg_id,excluded.last_read_msg_id),
+        last_delivered_msg_id=MAX(read_state.last_delivered_msg_id,excluded.last_delivered_msg_id)
+    """, (chat_id, u["id"], last_id,last_id))
     conn.execute("UPDATE notifications SET read_at=? WHERE chat_id=? AND user_id=? AND kind='message' AND read_at IS NULL",(now_iso(),chat_id,u["id"]))
+    recipients=[r['user_id'] for r in conn.execute("SELECT user_id FROM chat_members WHERE chat_id=?",(chat_id,))]
+    readable={recipient:read_receipts_visible(u['id'],recipient,conn) for recipient in recipients if recipient!=u['id']}
     conn.commit(); conn.close()
-    # notify peers that messages were read
-    with get_db() as conn:
-        recipients=[r[0] for r in conn.execute("SELECT user_id FROM chat_members WHERE chat_id=?",(chat_id,))]
-    conn.close()
+    if last_id>previous_read:
+        await mgr.send_to_user(u['id'], {"type":"read","chat_id":chat_id,"user_id":u['id'],"last_read_msg_id":last_id})
     for recipient in recipients:
-        await mgr.send_to_user(recipient, {"type":"read","chat_id":chat_id,"user_id":u["id"],"last_read_msg_id":last_id})
+        if recipient==u['id']:
+            continue
+        if last_id>previous_read and readable[recipient]:
+            await mgr.send_to_user(recipient, {"type":"read","chat_id":chat_id,"user_id":u['id'],"last_read_msg_id":last_id})
+        elif last_id>previous_delivery:
+            await mgr.send_to_user(recipient, {"type":"delivery","chat_ids":[chat_id]})
     return {"ok": True}
 
 # ---------- WebSocket ----------
