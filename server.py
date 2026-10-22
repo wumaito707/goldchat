@@ -475,6 +475,7 @@ class LoginIn(BaseModel):
 
 class GoogleLoginIn(BaseModel):
     credential: str
+    link: bool = False
 
 def session_token(request: Request, token: str = Query("")):
     authorization=request.headers.get("authorization", "")
@@ -536,10 +537,12 @@ def google_login(body: GoogleLoginIn, token: str = Depends(session_token)):
         raise HTTPException(503, "Google sign-in is not configured yet")
     if len(body.credential) > 10000:
         raise HTTPException(400, "Invalid Google sign-in")
+    linking_user = auth_user(token) if body.link else None
     try:
+        from functools import partial
         from google.oauth2 import id_token
         from google.auth.transport import requests as google_requests
-        claims = id_token.verify_oauth2_token(body.credential, google_requests.Request(), client_id)
+        claims = id_token.verify_oauth2_token(body.credential, partial(google_requests.Request(), timeout=10), client_id)
     except Exception as exc:
         logging.getLogger('uvicorn.error').info('Google ID token rejected: %s', type(exc).__name__)
         raise HTTPException(401, "Google sign-in could not be verified") from None
@@ -550,19 +553,26 @@ def google_login(body: GoogleLoginIn, token: str = Depends(session_token)):
     conn = get_db(cleanup=False)
     try:
         existing = conn.execute('SELECT * FROM users WHERE google_sub=?', (sub,)).fetchone()
-        if existing:
-            if token and auth_user(token)['id'] != existing['id']:
+        if body.link:
+            # Linking never creates or switches accounts. The verified email
+            # and authenticated GOLDCHAT account must belong to this user.
+            current = conn.execute('SELECT * FROM users WHERE id=?', (linking_user['id'],)).fetchone()
+            if not current or (current['verified_email'] or '').lower() != email:
+                raise HTTPException(409, 'Choose the Google account that matches your verified GOLDCHAT email')
+            if existing and existing['id'] != current['id']:
                 raise HTTPException(409, 'This Google account is already connected to another GOLDCHAT account')
+            changed = conn.execute('UPDATE users SET google_sub=? WHERE id=? AND (google_sub IS NULL OR google_sub=?)', (sub, current['id'], sub))
+            if changed.rowcount != 1:
+                raise HTTPException(409, 'A different Google account is already connected')
+            conn.commit()
+            row = conn.execute('SELECT * FROM users WHERE id=?', (current['id'],)).fetchone()
+        elif existing:
             row = existing
         else:
             email_owner = conn.execute('SELECT * FROM users WHERE verified_email=?', (email,)).fetchone()
             if email_owner:
                 # A matching email alone cannot silently attach a new login method.
-                if not token or auth_user(token)['id'] != email_owner['id']:
-                    raise HTTPException(409, 'This email already has a GOLDCHAT account. Sign in with your password first to connect Google.')
-                conn.execute('UPDATE users SET google_sub=? WHERE id=?', (sub, email_owner['id']))
-                conn.commit()
-                row = conn.execute('SELECT * FROM users WHERE id=?', (email_owner['id'],)).fetchone()
+                raise HTTPException(409, 'This email already has a GOLDCHAT account. Sign in with your password, then connect Google in Settings → Account recovery.')
             else:
                 if not (email.endswith('@gmail.com') or claims.get('hd')):
                     raise HTTPException(400, 'Use email verification for non-Gmail accounts, then connect Google in Account settings')
@@ -580,7 +590,7 @@ def google_login(body: GoogleLoginIn, token: str = Depends(session_token)):
         raise HTTPException(409, 'This Google account is already linked. Please try again.')
     finally:
         conn.close()
-    session = create_session(row['id'])
+    session = token if body.link else create_session(row['id'])
     return {"user": user_public(row), "token": session}
 
 def create_session(uid, label="Browser"):

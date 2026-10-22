@@ -69,9 +69,20 @@ class StatusPresenceTest(unittest.TestCase):
             verify.return_value={'sub':'google-test-456','email':'existing@gmail.com','email_verified':True}
             conflict=self.client.post('/api/auth/google',json={'credential':'another-signed-token'})
             self.assertEqual(conflict.status_code,409)
-            linked=self.client.post('/api/auth/google',json={'credential':'another-signed-token'},headers={'Authorization':'Bearer '+self.tokens[1]})
+            linked=self.client.post('/api/auth/google',json={'credential':'another-signed-token','link':True},headers={'Authorization':'Bearer '+self.tokens[1]})
             self.assertEqual(linked.status_code,200,linked.text)
             self.assertEqual(linked.json()['user']['id'],1)
+            self.assertEqual(linked.json()['token'],self.tokens[1])
+            with self.db() as conn:
+                before=conn.execute('SELECT COUNT(*) FROM users').fetchone()[0]
+            verify.return_value={'sub':'google-different','email':'different@gmail.com','email_verified':True}
+            mismatch=self.client.post('/api/auth/google',json={'credential':'different-email','link':True},headers={'Authorization':'Bearer '+self.tokens[1]})
+            self.assertEqual(mismatch.status_code,409)
+            with self.db() as conn:
+                self.assertEqual(conn.execute('SELECT COUNT(*) FROM users').fetchone()[0],before)
+            self.assertEqual(self.client.post('/api/auth/google',json={'credential':'different-email','link':True}).status_code,401)
+            verify.return_value={'sub':'google-unverified','email':'unverified@gmail.com','email_verified':False}
+            self.assertEqual(self.client.post('/api/auth/google',json={'credential':'unverified'}).status_code,401)
             verify.side_effect=ValueError('invalid signature')
             self.assertEqual(self.client.post('/api/auth/google',json={'credential':'invalid'}).status_code,401)
 

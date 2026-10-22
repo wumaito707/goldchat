@@ -9,6 +9,36 @@ let oldestMessageId=null;
 let refreshRunning=false;
 let refreshAgain=false;
 
+function uiIcon(name){
+  const paths={
+    chats:'<path d="M21 11.5a8.5 8.5 0 0 1-8.5 8.5H6l-4 2 1.7-5.1A8.5 8.5 0 1 1 21 11.5Z"/><path d="M7 9h9M7 13h6"/>',
+    updates:'<circle cx="12" cy="12" r="4"/><path d="M12 3a9 9 0 0 1 9 9M21 16a10 10 0 0 1-5 5M12 21a9 9 0 0 1-9-9M3 8a10 10 0 0 1 5-5"/>',
+    contacts:'<circle cx="9" cy="8" r="3"/><path d="M3 21v-3a6 6 0 0 1 12 0v3M16 5a3 3 0 0 1 0 6M18 15a5 5 0 0 1 3 5"/>',
+    calls:'<path d="m5 3 4 1 1 4-2 2a16 16 0 0 0 6 6l2-2 4 1 1 4c0 1-1 2-2 2C10 21 3 14 3 5c0-1 1-2 2-2Z"/>',
+    more:'<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>',
+    profile:'<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>',
+    star:'<path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2L12 17.3l-5.6 2.9 1.1-6.2L3 9.6l6.2-.9Z"/>',
+    theme:'<path d="M12 3a9 9 0 1 0 0 18h1a2 2 0 0 0 1-3.7 1.5 1.5 0 0 1 1-2.8h2A4 4 0 0 0 21 10a9 9 0 0 0-9-7Z"/><path d="M7 10h.01M10 6h.01M15 6h.01M18 10h.01"/>',
+    settings:'<path d="m10 3-1 3-3 1-3-1-1 3 2 3-2 3 1 3 3-1 3 1 1 3h4l1-3 3-1 3 1 1-3-2-3 2-3-1-3-3 1-3-1-1-3Z"/><circle cx="12" cy="12" r="3"/>',
+    devices:'<rect x="2" y="3" width="15" height="12" rx="2"/><path d="M7 21h8M11 15v6"/><rect x="16" y="9" width="6" height="12" rx="1"/>',
+    bell:'<path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"/>',
+    archive:'<rect x="3" y="3" width="18" height="4" rx="1"/><path d="M5 7v14h14V7M9 12h6"/>',
+    shield:'<path d="m12 2 8 4v6c0 6-8 10-8 10S4 18 4 12V6Z"/><path d="m8 12 3 3 5-6"/>',
+    qr:'<path d="M3 3h6v6H3zM15 3h6v6h-6zM3 15h6v6H3zM15 15h2v2h-2zM21 15v6h-6M12 3v9H3M12 16v5"/>',
+    download:'<path d="M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5"/>',
+    plus:'<path d="M12 5v14M5 12h14"/>',
+    close:'<path d="m6 6 12 12M6 18 18 6"/>',
+    chevron:'<path d="m9 5 7 7-7 7"/>',
+  };
+  return `<svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name]||paths.more}</svg>`;
+}
+for(const [section,icon] of [['Chats','chats'],['Updates','updates'],['Communities','contacts'],['Calls','calls'],['More','more']]){
+  for(const prefix of ['desktop','mobile']){
+    const button=document.getElementById(prefix+section);
+    if(button)button.querySelector('span').innerHTML=uiIcon(icon);
+  }
+}
+
 async function request(path, method='GET', body) {
   const response=await fetch(path, {
     method, headers:{'Authorization':'Bearer '+TOKEN,...(body?{'Content-Type':'application/json'}:{})}, body:body?JSON.stringify(body):undefined
@@ -86,12 +116,25 @@ function selectMainSection(section) {
   document.querySelectorAll('.desktop-nav-item,.mobile-nav-item').forEach(button=>{button.classList.remove('active');button.removeAttribute('aria-current');});
   (names[section]||names.Chats).forEach(id=>{const button=document.getElementById(id);button?.classList.add('active');button?.setAttribute('aria-current','page');});
 }
-function closePanel() {document.getElementById('modalRoot').innerHTML='';selectMainSection('Chats');}
+let panelReturnFocus=null;
+function closePanel() {
+  document.getElementById('modalRoot').innerHTML='';selectMainSection('Chats');
+  if(panelReturnFocus?.isConnected)panelReturnFocus.focus();
+  panelReturnFocus=null;
+}
 function panel(title, html, layout='dialog') {
   const root=document.getElementById('modalRoot');
-  root.innerHTML=`<div class="modal-overlay ${layout==='page'?'page-overlay':''}"><section class="modal feature-panel ${layout==='page'?'feature-page':''}" role="dialog" aria-modal="true" aria-label="${escapeHtml(title)}"><div class="panel-heading"><h3>${escapeHtml(title)}</h3><button class="feature-btn" id="panelClose" aria-label="Close dialog">✕</button></div>${html}<p class="panel-error" id="panelError" role="alert"></p></section></div>`;
+  if(!root.firstElementChild)panelReturnFocus=document.activeElement;
+  root.innerHTML=`<div class="modal-overlay ${layout==='page'?'page-overlay':''}"><section class="modal feature-panel ${layout==='page'?'feature-page':''}" role="dialog" aria-modal="true" aria-label="${escapeHtml(title)}"><div class="panel-heading"><h3>${escapeHtml(title)}</h3><button type="button" class="icon-btn" id="panelClose" aria-label="Close dialog">${uiIcon('close')}</button></div>${html}<p class="panel-error" id="panelError" role="alert"></p></section></div>`;
   root.querySelector('.modal-overlay').onclick=e=>{if(e.target===e.currentTarget) closePanel();};
   document.getElementById('panelClose').onclick=closePanel;
+  root.onkeydown=e=>{
+    if(e.key!=='Tab')return;
+    const controls=[...root.querySelectorAll('button:not(:disabled),a[href],input:not(:disabled),textarea:not(:disabled),select:not(:disabled),[tabindex="0"]')].filter(el=>el.getClientRects().length);
+    const first=controls[0],last=controls[controls.length-1];
+    if(e.shiftKey&&document.activeElement===first){e.preventDefault();last?.focus();}
+    else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first?.focus();}
+  };
   root.querySelector('input,textarea,button')?.focus();
   return root;
 }
@@ -99,6 +142,7 @@ function field(id,label,value='',type='text') {
   return `<div class="field"><label for="${id}">${escapeHtml(label)}</label><input id="${id}" type="${type}" value="${escapeHtml(String(value))}"></div>`;
 }
 function action(id,label) {return `<button class="feature-btn" id="${id}">${label}</button>`;}
+function menuAction(id,label,icon,detail=''){return `<button type="button" class="feature-btn menu-action" id="${id}"><span class="menu-symbol">${uiIcon(icon)}</span><span class="menu-copy"><strong>${escapeHtml(label)}</strong>${detail?`<small>${escapeHtml(detail)}</small>`:''}</span>${uiIcon('chevron')}</button>`;}
 function bind(id,fn) {
   document.getElementById(id).onclick=async e=>{
     const button=e.currentTarget;button.disabled=true;
@@ -112,7 +156,7 @@ function downloadJSON(data,name) {
 }
 
 const toolbar=document.createElement('div');toolbar.className='feature-toolbar';
-toolbar.innerHTML=action('featuresMenu','☰ Features')+action('archiveToggle','Archived')+action('createGroup','New group');
+toolbar.innerHTML=action('featuresMenu',uiIcon('more')+'<span>More</span>')+action('archiveToggle',uiIcon('archive')+'<span>Archived</span>')+action('createGroup',uiIcon('plus')+'<span>New group</span>');
 document.querySelector('.search-wrap').before(toolbar);
 const headerTools=document.createElement('div');headerTools.className='header-actions';
 headerTools.innerHTML=action('chatTools','⋯');document.querySelector('.chat-header').appendChild(headerTools);
@@ -126,13 +170,14 @@ function syncComposerActions(){const typed=!!composerInput.value.trim(),recordin
 composerInput.addEventListener('input',syncComposerActions);syncComposerActions();
 
 document.getElementById('featuresMenu').onclick=()=>{
-  panel('More',`<div class="feature-grid">${action('profileMenu','Profile & privacy')}${action('contactsMenu','Contacts')}${action('starsMenu','Starred messages')}${action('themesMenu','Chat themes')}${action('settingsMenu','Settings & accessibility')}${action('channelMenu','Create channel')}${action('exportMenu','Export messages & contacts')}${action('blockedMenu','Blocked users')}${action('notificationsMenu','Notifications')}${action('linkedDevicesMenu','Linked devices')}${action('qrMenu','My QR & share')}${action('scanMenu','Scan code')}${action('callsMenu','Call history')}</div>`);
+  panel('More',`<p class="helper">Make GOLDCHAT yours.</p><div class="feature-grid">${menuAction('profileMenu','Your profile','profile')}${menuAction('contactsMenu','Contacts','contacts')}${menuAction('starsMenu','Starred messages','star')}${menuAction('themesMenu','Chat themes','theme')}${menuAction('settingsMenu','Settings','settings')}${menuAction('channelMenu','Create channel','plus')}${menuAction('exportMenu','Export your data','download')}${menuAction('blockedMenu','Blocked users','shield')}${menuAction('notificationsMenu','Notifications','bell')}${menuAction('linkedDevicesMenu','Linked devices','devices')}${menuAction('qrMenu','My QR & share','qr')}${menuAction('scanMenu','Scan code','qr')}${menuAction('callsMenu','Call history','calls')}</div>`);
   selectMainSection('More');
   bind('profileMenu',showProfile);bind('contactsMenu',showContacts);bind('starsMenu',showStars);bind('themesMenu',showChatThemes);bind('settingsMenu',showSettings);bind('channelMenu',()=>showGroup('channel'));bind('blockedMenu',showBlocks);bind('notificationsMenu',showNotificationInbox);bind('linkedDevicesMenu',showDevices);bind('qrMenu',showMyQR);bind('scanMenu',showScanner);bind('callsMenu',showCallHistory);
   bind('exportMenu',async()=>{downloadJSON(await request('/api/export'),'goldchat-export.json');toast('Export downloaded');});
 };
-document.getElementById('archiveToggle').onclick=()=>{showArchived=!showArchived;document.getElementById('archiveToggle').textContent=showArchived?'Active chats':'Archived';renderChatList();};
+document.getElementById('archiveToggle').onclick=()=>{showArchived=!showArchived;document.getElementById('archiveToggle').innerHTML=uiIcon('archive')+`<span>${showArchived?'Active chats':'Archived'}</span>`;renderChatList();};
 document.getElementById('createGroup').onclick=()=>showGroup('group');
+document.getElementById('emptyStartChat').onclick=openNewChatModal;
 document.getElementById('chatTools').onclick=showChatTools;
 function openChatsTab(){closePanel();chatListFilter='all';renderChatList();document.getElementById('sidebar').classList.remove('hidden');}
 function openCommunitiesTab(){showGroup('channel');selectMainSection('Communities');}
@@ -273,7 +318,7 @@ function applySettings() {
   document.documentElement.style.setProperty('--message-size',(Number(localStorage.getItem('gc_text_size')||16))+'px');
 }
 function showSettings() {
-  panel('Settings',`<p class="helper">Choose what GOLDCHAT looks like, how it alerts you, and who can see your information.</p><div class="settings-list">${action('appearanceSettings','Appearance')}${action('notificationSettings','Notifications & sounds')}${action('storageSettings','Data & storage')}${action('privacySettings','Privacy & security')}${action('devicesSettings','Linked devices')}${action('permissionsMenu','Phone permissions')}${action('shortcutsSettings','Keyboard shortcuts')}${action('accountSettings','Account recovery')}</div>`);
+  panel('Settings',`<p class="helper">A little more personal. A little more you.</p><div class="settings-list">${menuAction('appearanceSettings','Appearance','theme','Theme, wallpaper and text size')}${menuAction('notificationSettings','Notifications & sounds','bell','Choose how you stay up to date')}${menuAction('storageSettings','Data & storage','download','Media downloads and offline cache')}${menuAction('privacySettings','Privacy & security','shield','Presence, read receipts and blocked users')}${menuAction('devicesSettings','Linked devices','devices','Manage your signed-in sessions')}${menuAction('permissionsMenu','Phone permissions','settings','Notifications, camera and microphone')}${menuAction('shortcutsSettings','Keyboard shortcuts','chats','Get around faster on desktop')}${menuAction('accountSettings','Account recovery','profile','Verified email and sign-in options')}</div>`);
   bind('appearanceSettings',showAppearanceSettings);bind('notificationSettings',showNotificationSettings);bind('storageSettings',showStorageSettings);bind('privacySettings',showPrivacySettings);bind('devicesSettings',showDevices);bind('permissionsMenu',showPhonePermissions);bind('shortcutsSettings',showKeyboardShortcuts);bind('accountSettings',showRecoveryContact);
 }
 function settingOn(key,fallback=true){const value=localStorage.getItem(key);return value===null?fallback:value==='on';}

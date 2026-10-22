@@ -1,9 +1,10 @@
 /* Verified account registration and recovery. No codes or proof tokens go in URLs. */
 const passwordInput=document.getElementById('password');
+passwordInput.parentElement.classList.add('password-field');
 const passwordToggle=document.createElement('button');
-passwordToggle.type='button';passwordToggle.className='feature-btn';
-passwordToggle.textContent='Show password';passwordToggle.setAttribute('aria-controls','password');passwordToggle.setAttribute('aria-pressed','false');
-passwordToggle.onclick=()=>{const show=passwordInput.type==='password';passwordInput.type=show?'text':'password';passwordToggle.textContent=show?'Hide password':'Show password';passwordToggle.setAttribute('aria-pressed',String(show));};
+passwordToggle.type='button';passwordToggle.className='password-toggle';
+passwordToggle.textContent='Show';passwordToggle.setAttribute('aria-label','Show password');passwordToggle.setAttribute('aria-controls','password');passwordToggle.setAttribute('aria-pressed','false');
+passwordToggle.onclick=()=>{const show=passwordInput.type==='password';passwordInput.type=show?'text':'password';passwordToggle.textContent=show?'Hide':'Show';passwordToggle.setAttribute('aria-label',show?'Hide password':'Show password');passwordToggle.setAttribute('aria-pressed',String(show));};
 passwordInput.after(passwordToggle);
 let authChallenge=null,authCodeSending=false;
 let savedAuthChallenges={};try{savedAuthChallenges=JSON.parse(sessionStorage.getItem("gc_verification_requests")||"{}");}catch(e){sessionStorage.removeItem("gc_verification_requests");}
@@ -15,13 +16,14 @@ const forgotPassword=document.createElement('button');forgotPassword.type='butto
 forgotPassword.onclick=()=>setMode('reset');
 const baseSetMode=setMode;
 setMode=function(next){
-  passwordInput.type='password';passwordToggle.textContent='Show password';passwordToggle.setAttribute('aria-pressed','false');
+  passwordInput.type='password';passwordToggle.textContent='Show';passwordToggle.setAttribute('aria-label','Show password');passwordToggle.setAttribute('aria-pressed','false');
   baseSetMode(next);authChallenge=null;document.getElementById('verificationCode').value='';
   const reset=next==='reset',contact=next!=='login';
   contactFields.hidden=!contact;forgotPassword.hidden=contact;
   contactFields.querySelectorAll('input,select,button').forEach(control=>control.disabled=!contact);
   document.getElementById('username').closest('.field').hidden=reset;document.getElementById('username').required=!reset;
-  document.getElementById('username').closest('.field').querySelector('label').textContent=next==='register'?'Username':'Username, verified email';
+  document.getElementById('username').closest('.field').querySelector('label').textContent=next==='register'?'Username':'Username or verified email';
+  document.getElementById('username').placeholder=next==='register'?'Choose a username':'Username or email';
   document.getElementById('password').closest('.field').querySelector('label').textContent=reset?'New password':'Password';
   document.getElementById('password').autocomplete=next==='login'?'current-password':'new-password';
   document.getElementById('verificationAddress').required=contact;
