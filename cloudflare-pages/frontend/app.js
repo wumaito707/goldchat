@@ -98,6 +98,7 @@ function clearSignedInState(){
   chats=[];activeChatId=null;replyTo=null;
   if(typeof messageCache!=='undefined')messageCache.clear();
   if(typeof ownerAdminAllowed!=='undefined')ownerAdminAllowed=false;
+  if(typeof clearUpdateAnnouncement==='function')clearUpdateAnnouncement();
   if(typeof closePanel==='function')closePanel();
   if(typeof endCall==='function')endCall(false);
   document.getElementById('messages').replaceChildren();
@@ -147,7 +148,7 @@ function connectWS(){
     if (activeChatId) { wsSend({type:'subscribe',chat_id:activeChatId}); refreshMessages(); }
     // The initial chat list was already loaded during startup. Refresh only
     // after a reconnect, when messages may have arrived while offline.
-    if (wsConnectedBefore) loadChats();
+    if (wsConnectedBefore) {loadChats();refreshUpdateAnnouncement();}
     wsConnectedBefore = true;
   };
   ws.onmessage = (ev)=>{
@@ -164,6 +165,7 @@ function connectWS(){
 }
 
 function handleWSEvent(d){
+  if (d.type === 'announcements_changed') { refreshUpdateAnnouncement(); return; }
   if (d.type === 'profile_changed') { syncOwnProfile(); return; }
   if (d.type === 'notifications_changed') { refreshNotifications(true); return; }
   if (d.type === 'membership_removed') { handleMembershipRemoved(d.chat_id); return; }

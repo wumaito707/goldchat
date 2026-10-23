@@ -652,8 +652,8 @@ kbd {border:1px solid var(--gold-dim);border-bottom-width:3px;border-radius:5px;
 .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0;}
 .auth-privacy{font-size:11px;line-height:1.6;margin-top:16px;color:var(--text-dim);text-align:center;}
 .auth-privacy a,.privacy-copy a{color:var(--gold-bright);}
-.privacy-reminder{padding:8px 16px;font-size:10.5px;line-height:1.45;color:var(--text-dim);border-bottom:1px solid var(--black-3);background:var(--black-2);}
-.privacy-reminder button{border:0;background:transparent;color:var(--gold-bright);font:inherit;text-decoration:underline;cursor:pointer;}
+.update-announcement{margin:10px 12px 2px;padding:13px 14px;border:1px solid var(--gold-dim);border-radius:13px;background:var(--gold-soft);overflow-wrap:anywhere;}
+.update-announcement strong{display:block;color:var(--gold-bright);font-size:13px;line-height:1.4;}.update-announcement p{font-size:12px;line-height:1.5;margin:6px 0;white-space:pre-wrap;color:var(--text);}.update-announcement small{display:block;color:var(--text-dim);font-size:10px;line-height:1.4;}
 .privacy-copy p{color:var(--text-dim);font-size:14px;line-height:1.7;margin:12px 0;}.privacy-copy h4{margin-top:22px;}
 .owner-console{width:min(1160px,100vw);}
 .owner-dashboard{max-width:1080px;margin:0 auto;padding-bottom:30px;}

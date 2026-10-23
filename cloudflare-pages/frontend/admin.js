@@ -50,9 +50,9 @@ async function refreshOwnerAccess(){
 }
 const enterAppWithOwnerTools=enterApp;
 enterApp=async function(...args){
-  ownerAdminAllowed=false;closePanel();
+  ownerAdminAllowed=false;closePanel();clearUpdateAnnouncement();
   await enterAppWithOwnerTools(...args);
-  refreshOwnerAccess();
+  refreshOwnerAccess();refreshUpdateAnnouncement();
 };
 
 function showPrivacyData(){
@@ -63,7 +63,7 @@ async function showOwnerDashboard(tab='overview',options={}){
   if(!ownerAdminAllowed){toast('Owner access is required.');return;}
   cleanOwnerMedia();
   ownerState={tab,q:'',offset:0,accountState:'all',userId:null,userLabel:'',before:null,...options};
-  const tabs=[['overview','Overview'],['users','Users'],['chats','Conversations'],['statuses','Statuses'],['calls','Calls'],['audit','Audit log']];
+  const tabs=[['overview','Overview'],['users','Users'],['announcements','Announcements'],['chats','Conversations'],['statuses','Statuses'],['calls','Calls'],['audit','Audit log']];
   panel('Owner dashboard',`<div class="owner-dashboard"><div class="owner-heading"><div><span class="owner-eyebrow">GOLDCHAT ADMINISTRATION</span><p>Review activity and manage accounts.</p></div><button type="button" class="feature-btn" id="ownerRefresh">Refresh</button></div><nav class="owner-tabs" aria-label="Owner dashboard sections">${tabs.map(([key,label])=>`<button type="button" data-owner-tab="${key}" class="${key===tab?'active':''}" ${key===tab?'aria-current="page"':''}>${label}</button>`).join('')}</nav><p id="ownerError" class="panel-error" role="alert"></p><section id="ownerContent" aria-live="polite"><p class="helper">Loading dashboard…</p></section></div>`,'page');
   selectMainSection('More');socialCleanup=cleanOwnerMedia;
   document.querySelector('.feature-page').classList.add('owner-console');
@@ -83,6 +83,7 @@ async function loadOwnerSection(){
   try{
     if(ownerState.tab==='overview')await ownerOverview(content);
     else if(ownerState.tab==='users')await ownerUsers(content);
+    else if(ownerState.tab==='announcements')await ownerAnnouncements(content);
     else if(ownerState.tab==='chats')await ownerChats(content);
     else if(ownerState.tab==='statuses')ownerStatusStart(content);
     else if(ownerState.tab==='calls')await ownerCalls(content);
@@ -95,6 +96,29 @@ async function ownerOverview(content){
   const data=await ownerRequest('overview');if(!content.isConnected)return;
   const labels={users:'Registered accounts',signups_24h:'New accounts · 24h',suspended:'Banned accounts',deleted_accounts:'Deleted accounts',conversations:'Conversations',messages:'Retained messages',statuses:'Active statuses',signed_in_accounts:'Accounts with valid sessions',calls_24h:'Calls · 24h'};
   content.innerHTML=`<div class="owner-stats">${Object.entries(labels).map(([key,label])=>`<article><small>${label}</small><strong>${Number(data.counts[key])||0}</strong></article>`).join('')}</div><h4>Latest registrations</h4><div class="owner-list">${data.recent_users.map(user=>`<div><span><strong>${ownerEscape(user.display_name)}</strong><small>@${ownerEscape(user.username)}</small></span><time>${ownerEscape(ownerDate(user.created_at))}</time></div>`).join('')||'<p class="helper">No accounts yet.</p>'}</div><h4>Service configuration</h4><div class="owner-service">${Object.entries({email_configured:'Verification email',google_configured:'Google sign-in',push_configured:'Push notifications',cloud_storage:'Cloud media storage'}).map(([key,label])=>`<span>${label}<b>${data.service[key]?'Configured':'Not configured'}</b></span>`).join('')}</div><p class="helper">Checked ${ownerEscape(ownerDate(data.checked_at))}. Session totals do not mean every account is currently online.</p>`;
+}
+
+async function ownerAnnouncements(content){
+  const data=await ownerRequest('announcements');if(!content.isConnected)return;
+  content.innerHTML=`<h4>Update announcements</h4><p class="helper">Publish an app update on the chat home page. Each announcement disappears automatically 2 hours after publication. A new announcement replaces the previous one.</p><form class="owner-action-card" id="ownerAnnouncementForm"><div class="field"><label for="ownerAnnouncementTitle">Title</label><input id="ownerAnnouncementTitle" required minlength="3" maxlength="100" placeholder="What is new in GOLDCHAT?"></div><div class="field"><label for="ownerAnnouncementBody">Update details</label><textarea id="ownerAnnouncementBody" required rows="4" maxlength="700" placeholder="Tell users what has changed"></textarea></div><button class="feature-btn" type="submit">Publish for 2 hours</button></form><h4>Recent announcements</h4>${data.items.map(item=>{
+    const active=!item.withdrawn_at&&item.expires_at>data.server_time;
+    return `<article class="owner-message"><header><strong>${ownerEscape(item.title)}</strong><span class="owner-badge">${item.withdrawn_at?'Withdrawn':active?'Active':'Expired'}</span></header><p>${ownerEscape(item.body)}</p><small>Published ${ownerEscape(ownerDate(item.created_at))} · Ends ${ownerEscape(ownerDate(item.expires_at))}</small>${active?`<button type="button" class="feature-btn" data-withdraw-announcement="${item.id}">Withdraw announcement</button>`:''}</article>`;
+  }).join('')||'<p class="helper">No update announcements have been published.</p>'}`;
+  content.querySelector('#ownerAnnouncementForm').onsubmit=async e=>{
+    e.preventDefault();const form=e.currentTarget,button=form.querySelector('button');button.disabled=true;
+    try{
+      await ownerRequest('announcements','POST',{title:form.querySelector('#ownerAnnouncementTitle').value.trim(),body:form.querySelector('#ownerAnnouncementBody').value.trim()});
+      toast('Update announcement published for 2 hours.');refreshUpdateAnnouncement();
+      if(content.isConnected)await loadOwnerSection();
+    }catch(error){if(content.isConnected){ownerError(error);button.disabled=false;}}
+  };
+  content.querySelectorAll('[data-withdraw-announcement]').forEach(button=>button.onclick=async()=>{
+    button.disabled=true;
+    try{
+      await ownerRequest(`announcements/${button.dataset.withdrawAnnouncement}/withdraw`,'POST',{reason:'Owner withdrew this update announcement'});
+      toast('Update announcement withdrawn.');refreshUpdateAnnouncement();if(content.isConnected)await loadOwnerSection();
+    }catch(error){if(content.isConnected){ownerError(error);button.disabled=false;}}
+  });
 }
 
 function ownerPager(content,total,limit){

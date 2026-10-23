@@ -88,6 +88,9 @@ class StatusPresenceTest(unittest.TestCase):
     def test_admin_routes_enforce_fresh_owner_permissions(self):
         paths=[('GET','overview',None),('GET','users',None),('GET','chats',None),
                ('GET','calls',None),('GET','audit',None),
+               ('GET','announcements',None),
+               ('POST','announcements',{'title':'GOLDCHAT update','body':'New app improvements'}),
+               ('POST','announcements/1/withdraw',{'reason':'Withdraw an update announcement'}),
                ('POST','chats/1/messages',{'reason':'Investigate a user report'}),
                ('POST','statuses/review',{'reason':'Investigate a user report'}),
                ('POST','media/attachment/1/review',{'reason':'Investigate a user report'}),
@@ -119,6 +122,47 @@ class StatusPresenceTest(unittest.TestCase):
                 conn.execute('DELETE FROM admin_roles WHERE user_id=1')
             self.assertEqual(self.client.get('/api/admin/overview',headers=headers).status_code,403)
         self.assertFalse(self.call(1,'GET','/api/admin/access')['allowed'])
+
+    def test_update_announcements_expire_after_two_hours_without_expiring_notifications(self):
+        import admin_console
+        from datetime import datetime,timezone
+        now=time.time()
+        with self.db() as conn:
+            nid=conn.execute('INSERT INTO notifications(user_id,kind,title,body,created_at) VALUES(?,?,?,?,?)',
+                (2,'message','Normal notification','This alert keeps its current behavior',datetime.fromtimestamp(now-10800,timezone.utc).isoformat())).lastrowid
+        self.assertEqual(self.client.get('/api/announcements').status_code,401)
+        with self.owner() as headers, patch.object(admin_console.time,'time',return_value=now):
+            invalid=self.client.post('/api/admin/announcements',headers=headers,json={'title':'   ','body':'   '})
+            self.assertEqual(invalid.status_code,422)
+            posted=self.client.post('/api/admin/announcements',headers=headers,
+                json={'title':' GOLDCHAT update ','body':' New chat improvements ','expires_at':now+86400})
+            self.assertEqual(posted.status_code,200,posted.text)
+            self.assertEqual(posted.json()['expires_at']-posted.json()['created_at'],7200)
+            aid=posted.json()['id']
+        with patch.object(admin_console.time,'time',return_value=now+7199):
+            visible=self.call(2,'GET','/api/announcements')['announcement']
+            self.assertEqual(visible['id'],aid)
+            self.assertEqual(visible['title'],'GOLDCHAT update')
+        with patch.object(admin_console.time,'time',return_value=now+7200):
+            response=self.client.get('/api/announcements',headers={'Authorization':'Bearer '+self.tokens[2]})
+            self.assertEqual(response.status_code,200,response.text)
+            self.assertIsNone(response.json()['announcement'])
+            self.assertEqual(response.headers['cache-control'],'no-store')
+            self.assertIn(nid,{n['id'] for n in self.call(2,'GET','/api/social/notifications')['items']})
+
+    def test_owner_can_replace_or_withdraw_update_announcements_and_actions_are_audited(self):
+        with self.owner() as headers:
+            first=self.client.post('/api/admin/announcements',headers=headers,json={'title':'First update','body':'First change'}).json()['id']
+            second=self.client.post('/api/admin/announcements',headers=headers,json={'title':'Second update','body':'Second change'}).json()['id']
+            self.assertEqual(self.call(3,'GET','/api/announcements')['announcement']['id'],second)
+            history=self.client.get('/api/admin/announcements',headers=headers).json()['items']
+            self.assertIsNotNone(next(item for item in history if item['id']==first)['withdrawn_at'])
+            withdrawn=self.client.post(f'/api/admin/announcements/{second}/withdraw',headers=headers,json={'reason':'Owner withdrew this update announcement'})
+            self.assertEqual(withdrawn.status_code,200,withdrawn.text)
+            self.assertIsNone(self.call(3,'GET','/api/announcements')['announcement'])
+            with self.db() as conn:
+                actions={r['action'] for r in conn.execute('SELECT action FROM admin_audit WHERE target_type=? AND target_id=?',('announcement',second))}
+                self.assertEqual(actions,{'update_announcement_published','update_announcement_withdrawn'})
 
     def test_admin_message_review_is_audited_paginated_and_does_not_mark_read(self):
         server=self.server

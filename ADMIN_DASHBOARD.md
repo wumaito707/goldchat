@@ -8,6 +8,7 @@ The project owner selected the existing **Johns** account, whose sign-in usernam
 
 - Overview: registration, conversation, retained-message, active-status and session totals; recent registrations and configuration indicators.
 - Users: search names, usernames and verified email addresses; filter active, banned and deleted accounts; view each account's conversations.
+- Announcements: publish app-update text on the chat home page for exactly two hours from publication, or withdraw it earlier. Publishing a new announcement replaces the previous one. Expired announcements are excluded by the server and removed by an on-screen timer; returning to the app refreshes the server time. Normal message, status, device and call notifications keep their existing behavior. Publication and withdrawal are audited.
 - Account management: ban/unban, sign out all devices, recoverably delete/restore. Ban and delete revoke sessions and disconnect sockets on the server handling the action. Other server instances recheck sessions when their short authentication cache expires. Restoring an account requires the user to sign in again. A banned account stays banned if its deleted state alone is restored.
 - Conversations: review retained messages with a support or moderation reason; load earlier messages and explicitly open shared media. Reviews do not mark participant messages as read.
 - Statuses: review active status text and media with a reason.

@@ -13,6 +13,7 @@ import cloud_media
 # Provision only a specifically confirmed existing record, never the first
 # signup or a matching display name. The owner confirmed this existing account.
 OWNER_ACCOUNT = {'id':8,'username':'Jos','created_at':'2026-10-18T22:04:49.180156Z'}
+ANNOUNCEMENT_LIFETIME_SECONDS = 2 * 60 * 60
 
 
 def init_schema(conn):
@@ -30,6 +31,12 @@ def init_schema(conn):
             target_type TEXT NOT NULL, target_id INTEGER, reason TEXT NOT NULL,
             created_at TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS idx_admin_audit_created ON admin_audit(id);
+        CREATE TABLE IF NOT EXISTS update_announcements (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            author_id INTEGER NOT NULL REFERENCES users(id), title TEXT NOT NULL,
+            body TEXT NOT NULL, created_at REAL NOT NULL, expires_at REAL NOT NULL,
+            withdrawn_at REAL);
+        CREATE INDEX IF NOT EXISTS idx_update_announcements_expiry ON update_announcements(expires_at);
     ''')
     if OWNER_ACCOUNT:
         changed=conn.execute('''INSERT OR IGNORE INTO admin_roles(user_id,role,created_at)
@@ -60,6 +67,19 @@ class SuspensionIn(ReviewIn):
 class DeletionIn(ReviewIn):
     deleted: bool
     username_confirmation: str = Field(min_length=3,max_length=32)
+
+
+class AnnouncementIn(BaseModel):
+    title: str = Field(min_length=3,max_length=100)
+    body: str = Field(min_length=1,max_length=700)
+
+    @field_validator('title','body')
+    @classmethod
+    def trim_text(cls,value,info):
+        value=value.strip()
+        if len(value)<(3 if info.field_name=='title' else 1):
+            raise ValueError('Enter announcement text')
+        return value
 
 
 def install(app, b):
@@ -114,7 +134,7 @@ def install(app, b):
     @app.middleware('http')
     async def private_admin_responses(request, call_next):
         response=await call_next(request)
-        if request.url.path.startswith('/api/admin/'):
+        if request.url.path.startswith('/api/admin/') or request.url.path=='/api/announcements':
             response.headers['Cache-Control']='no-store'
             response.headers['Pragma']='no-cache'
             response.headers['X-Content-Type-Options']='nosniff'
@@ -129,6 +149,52 @@ def install(app, b):
                 return {'allowed':False}
             raise
         return {'allowed':True,'username':owner['username'],'role':'owner'}
+
+    async def announce_changed():
+        for uid in {info['user_id'] for info in list(b['mgr'].active.values())}:
+            try:
+                await b['mgr'].send_to_user(uid,{'type':'announcements_changed'})
+            except Exception:
+                # Periodic refresh also picks up updates after a disconnected socket.
+                pass
+
+    @app.get('/api/announcements')
+    def active_announcement(token: str = Depends(b['session_token'])):
+        b['auth_user'](token)
+        now=time.time()
+        with db() as conn:
+            row=conn.execute('''SELECT id,title,body,created_at,expires_at FROM update_announcements
+                WHERE withdrawn_at IS NULL AND expires_at>? ORDER BY id DESC LIMIT 1''',(now,)).fetchone()
+        return {'announcement':dict(row) if row else None,'server_time':time.time()}
+
+    @app.get('/api/admin/announcements')
+    def announcements(owner=Depends(actor)):
+        with db() as conn:
+            rows=conn.execute('''SELECT id,title,body,created_at,expires_at,withdrawn_at
+                FROM update_announcements ORDER BY id DESC LIMIT 20''').fetchall()
+        return {'items':[dict(row) for row in rows],'server_time':time.time(),
+                'lifetime_seconds':ANNOUNCEMENT_LIFETIME_SECONDS}
+
+    @app.post('/api/admin/announcements')
+    async def publish_announcement(body: AnnouncementIn, owner=Depends(actor)):
+        now=time.time();expires=now+ANNOUNCEMENT_LIFETIME_SECONDS
+        with db() as conn:
+            conn.execute('UPDATE update_announcements SET withdrawn_at=? WHERE withdrawn_at IS NULL AND expires_at>?',(now,now))
+            aid=conn.execute('INSERT INTO update_announcements(author_id,title,body,created_at,expires_at) VALUES(?,?,?,?,?)',
+                (owner['id'],body.title,body.body,now,expires)).lastrowid
+            audit(conn,owner,'update_announcement_published','announcement',aid,body.title)
+        await announce_changed()
+        return {'id':aid,'created_at':now,'expires_at':expires}
+
+    @app.post('/api/admin/announcements/{aid}/withdraw')
+    async def withdraw_announcement(aid: int, body: ReviewIn, owner=Depends(actor)):
+        with db() as conn:
+            if not conn.execute('SELECT 1 FROM update_announcements WHERE id=?',(aid,)).fetchone():
+                raise HTTPException(404,'Announcement not found')
+            conn.execute('UPDATE update_announcements SET withdrawn_at=COALESCE(withdrawn_at,?) WHERE id=?',(time.time(),aid))
+            audit(conn,owner,'update_announcement_withdrawn','announcement',aid,body.reason)
+        await announce_changed()
+        return {'ok':True}
 
     @app.get('/api/admin/overview')
     def overview(owner=Depends(actor)):
