@@ -24,6 +24,7 @@ except ImportError:
 import features
 import social
 import account_security
+import admin_console
 import sms_config
 import email_config
 import cloud_database
@@ -172,6 +173,7 @@ def init_db():
     social.init_schema(conn)
     account_security.init_schema(conn)
     push_notifications.init_schema(conn)
+    admin_console.init_schema(conn)
     conn.commit()
     conn.close()
 
@@ -602,10 +604,16 @@ def google_login(body: GoogleLoginIn, token: str = Depends(session_token)):
 
 def create_session(uid, label="Browser"):
     token = secrets.token_hex(24)
-    with get_db() as conn:
-        conn.execute("DELETE FROM sessions WHERE expires_at<=?", (time.time(),))
-        conn.execute("INSERT INTO sessions(token_hash,user_id,expires_at,label,created_at) VALUES(?,?,?,?,?)", (hashlib.sha256(token.encode()).hexdigest(), uid, time.time()+30*86400,label[:80],time.time()))
-    conn.close()
+    conn=get_db()
+    try:
+        with conn:
+            account=conn.execute('SELECT suspended_at,deleted_at FROM users WHERE id=?',(uid,)).fetchone()
+            if not account or account['suspended_at'] is not None or account['deleted_at'] is not None:
+                raise HTTPException(403,'This GOLDCHAT account is disabled. Contact support.')
+            conn.execute("DELETE FROM sessions WHERE expires_at<=?", (time.time(),))
+            conn.execute("INSERT INTO sessions(token_hash,user_id,expires_at,label,created_at) VALUES(?,?,?,?,?)", (hashlib.sha256(token.encode()).hexdigest(), uid, time.time()+30*86400,label[:80],time.time()))
+    finally:
+        conn.close()
     return token
 
 
@@ -632,6 +640,8 @@ def auth_user(token: str):
     conn.close()
     if row is None:
         raise HTTPException(401, "Invalid or expired session")
+    if row['suspended_at'] is not None or row['deleted_at'] is not None:
+        raise HTTPException(403,'This GOLDCHAT account is disabled. Contact support.')
     with _auth_cache_lock:
         _auth_cache[token_hash] = (now + _AUTH_CACHE_SECONDS, row)
     return row
@@ -674,7 +684,7 @@ def search_users(q: str = Query(...), token: str = Depends(session_token)):
     conn = get_db()
     rows = conn.execute("""
         SELECT * FROM users
-        WHERE (username LIKE ? OR display_name LIKE ?) AND id != ?
+        WHERE (username LIKE ? OR display_name LIKE ?) AND id != ? AND suspended_at IS NULL AND deleted_at IS NULL
         LIMIT 20
     """, (f"%{q}%", f"%{q}%", u["id"])).fetchall()
     conn.close()
@@ -691,7 +701,7 @@ def start_direct(user_id: int, token: str = Depends(session_token)):
     if user_id == u["id"]:
         raise HTTPException(400, "Choose another user to start a chat")
     conn = get_db()
-    peer = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+    peer = conn.execute("SELECT * FROM users WHERE id=? AND suspended_at IS NULL AND deleted_at IS NULL", (user_id,)).fetchone()
     if not peer:
         conn.close(); raise HTTPException(404, "User not found")
     cid = get_or_create_direct_chat(u["id"], user_id)
@@ -838,6 +848,7 @@ FEATURE_HOOKS = features.install(app, globals())
 PUSH_MESSAGE = push_notifications.install(app, globals())
 SOCIAL_HOOKS = social.install(app, globals(),FEATURE_HOOKS)
 consume_registration = account_security.install(app, globals())
+ADMIN_HOOKS = admin_console.install(app, globals())
 
 # ---------- Static serving ----------
 # SPA fallback: serve index.html for non-API routes

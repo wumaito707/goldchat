@@ -156,6 +156,9 @@ def install(app, b):
             chat = conn.execute('SELECT * FROM chats WHERE id=?', (cid,)).fetchone()
             if chat['type'] == 'channel' and chat['owner_id'] != uid:
                 raise HTTPException(403, 'Only the channel owner can post')
+            if chat['type']=='direct' and conn.execute('''SELECT 1 FROM chat_members cm JOIN users u ON u.id=cm.user_id
+                    WHERE cm.chat_id=? AND cm.user_id!=? AND (u.suspended_at IS NOT NULL OR u.deleted_at IS NOT NULL)''',(cid,uid)).fetchone():
+                raise HTTPException(403,'This account is currently unavailable')
             blocked = conn.execute('''SELECT 1 FROM blocks b JOIN chat_members cm ON cm.user_id=b.blocked_id
                 WHERE cm.chat_id=? AND b.user_id=? UNION SELECT 1 FROM blocks b JOIN chat_members cm ON cm.user_id=b.user_id
                 WHERE cm.chat_id=? AND b.blocked_id=?''', (cid,uid,cid,uid)).fetchone()
@@ -373,7 +376,7 @@ def install(app, b):
             if values:clauses.append('LOWER('+column+') IN ('+','.join('?' for _ in values)+')');args.extend(values)
         if not clauses:return []
         with connection() as conn:
-            rows=conn.execute('SELECT u.* FROM users u WHERE u.id!=? AND ('+' OR '.join(clauses)+') AND NOT EXISTS(SELECT 1 FROM blocks WHERE (user_id=? AND blocked_id=u.id) OR (user_id=u.id AND blocked_id=?))',[uid,*args,uid,uid]).fetchall()
+            rows=conn.execute('SELECT u.* FROM users u WHERE u.id!=? AND u.suspended_at IS NULL AND u.deleted_at IS NULL AND ('+' OR '.join(clauses)+') AND NOT EXISTS(SELECT 1 FROM blocks WHERE (user_id=? AND blocked_id=u.id) OR (user_id=u.id AND blocked_id=?))',[uid,*args,uid,uid]).fetchall()
             result=[public(row) for row in rows]
         conn.close();return result
 
@@ -389,7 +392,7 @@ def install(app, b):
     def add_contact(mid:int, token:str=Depends(b["session_token"])):
         uid=user(token)
         with connection() as conn:
-            if mid==uid or not conn.execute('SELECT 1 FROM users WHERE id=?',(mid,)).fetchone():
+            if mid==uid or not conn.execute('SELECT 1 FROM users WHERE id=? AND suspended_at IS NULL AND deleted_at IS NULL',(mid,)).fetchone():
                 raise HTTPException(400,'Choose another existing user')
             conn.execute('INSERT OR IGNORE INTO contacts VALUES(?,?)',(uid,mid))
         conn.close(); return {'ok':True}

@@ -99,6 +99,7 @@ def install(app,b,hooks):
     def media_public(row):return {k:row[k] for k in ('id','name','mime','size')}
     def can_status(viewer,author,conn,audience=None):
         if viewer==author:return True
+        if not conn.execute('SELECT 1 FROM users WHERE id=? AND suspended_at IS NULL AND deleted_at IS NULL',(author,)).fetchone():return False
         if conn.execute('SELECT 1 FROM blocks WHERE (user_id=? AND blocked_id=?) OR (user_id=? AND blocked_id=?)',(viewer,author,author,viewer)).fetchone():return False
         if audience is None:
             p=conn.execute('SELECT privacy FROM users WHERE id=?',(author,)).fetchone()
@@ -349,7 +350,7 @@ def install(app,b,hooks):
     @app.get('/api/social/contact/{username}')
     def contact_lookup(username:str,token:str=Depends(b["session_token"])):
         uid(token)
-        with db() as conn:row=conn.execute('SELECT * FROM users WHERE username=?',(username,)).fetchone()
+        with db() as conn:row=conn.execute('SELECT * FROM users WHERE username=? AND suspended_at IS NULL AND deleted_at IS NULL',(username,)).fetchone()
         if not row:raise HTTPException(404,'Contact not found')
         return b['user_public'](row)
 

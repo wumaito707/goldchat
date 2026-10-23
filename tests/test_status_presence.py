@@ -1,7 +1,8 @@
-"""Regression checks for per-post status privacy and chat presence."""
+"""Regression checks for chat privacy, identity and owner administration."""
 import os
 import gc
 import json
+import sqlite3
 import tempfile
 import time
 import unittest
@@ -10,6 +11,24 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+
+
+class OwnerProvisioningTest(unittest.TestCase):
+    def test_owner_bootstrap_requires_the_exact_confirmed_database_record(self):
+        import admin_console
+        conn=sqlite3.connect(':memory:')
+        try:
+            conn.execute('CREATE TABLE users(id INTEGER PRIMARY KEY,username TEXT,created_at TEXT)')
+            conn.execute("INSERT INTO users VALUES(8,'Jos','different-account-time')")
+            admin_console.init_schema(conn)
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM admin_roles').fetchone()[0],0)
+            conn.execute('UPDATE users SET created_at=? WHERE id=8',(admin_console.OWNER_ACCOUNT['created_at'],))
+            admin_console.init_schema(conn)
+            admin_console.init_schema(conn)
+            self.assertEqual(conn.execute('SELECT user_id,role FROM admin_roles').fetchall(),[(8,'owner')])
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM admin_audit').fetchone()[0],1)
+        finally:
+            conn.close()
 
 
 class StatusPresenceTest(unittest.TestCase):
@@ -55,6 +74,203 @@ class StatusPresenceTest(unittest.TestCase):
         response = self.client.request(method, path, headers={'Authorization': 'Bearer ' + self.tokens[uid]}, **kwargs)
         self.assertLess(response.status_code, 400, response.text)
         return response.json()
+
+    @contextmanager
+    def owner(self):
+        with self.db() as conn:
+            conn.execute("INSERT INTO admin_roles(user_id,role,created_at) VALUES(1,'owner',?)",(self.server.now_iso(),))
+        try:
+            yield {'Authorization':'Bearer '+self.tokens[1]}
+        finally:
+            with self.db() as conn:
+                conn.execute('DELETE FROM admin_roles WHERE user_id=1')
+
+    def test_admin_routes_enforce_fresh_owner_permissions(self):
+        paths=[('GET','overview',None),('GET','users',None),('GET','chats',None),
+               ('GET','calls',None),('GET','audit',None),
+               ('POST','chats/1/messages',{'reason':'Investigate a user report'}),
+               ('POST','statuses/review',{'reason':'Investigate a user report'}),
+               ('POST','media/attachment/1/review',{'reason':'Investigate a user report'}),
+               ('POST','users/2/suspension',{'reason':'Investigate a user report','suspended':True}),
+               ('POST','users/2/deletion',{'reason':'Investigate a user report','deleted':True,'username_confirmation':'viewer'}),
+               ('POST','users/2/sign-out',{'reason':'Investigate a user report'})]
+        for method,path,body in paths:
+            url='/api/admin/'+path
+            self.assertEqual(self.client.request(method,url,json=body).status_code,401,url)
+            denied=self.client.request(method,url,json=body,headers={'Authorization':'Bearer '+self.tokens[2]})
+            self.assertEqual(denied.status_code,403,denied.text)
+            self.assertEqual(denied.headers['cache-control'],'no-store')
+        self.assertEqual(self.call(2,'GET','/api/admin/access'),{'allowed':False})
+        self.call(2,'PATCH','/api/profile',json={'display_name':'Viewer','bio':'','privacy':'everyone','role':'owner','is_owner':True})
+        self.assertFalse(self.call(2,'GET','/api/admin/access')['allowed'])
+        with self.owner() as headers:
+            self.assertTrue(self.client.get('/api/admin/access',headers=headers).json()['allowed'])
+            overview=self.client.get('/api/admin/overview',headers=headers)
+            self.assertEqual(overview.status_code,200,overview.text)
+            self.assertGreaterEqual(overview.json()['counts']['users'],5)
+            users=self.client.get('/api/admin/users',headers=headers).json()
+            self.assertGreaterEqual(users['total'],5)
+            for user in users['items']:
+                self.assertTrue({'id','username','display_name','verified_email','created_at','is_owner'}<=user.keys())
+                self.assertFalse({'password_hash','salt','google_sub','token_hash'} & user.keys())
+            # Permission removal takes effect even when normal auth is cached.
+            self.call(1,'GET','/api/me')
+            with self.db() as conn:
+                conn.execute('DELETE FROM admin_roles WHERE user_id=1')
+            self.assertEqual(self.client.get('/api/admin/overview',headers=headers).status_code,403)
+        self.assertFalse(self.call(1,'GET','/api/admin/access')['allowed'])
+
+    def test_admin_message_review_is_audited_paginated_and_does_not_mark_read(self):
+        server=self.server
+        cid=server.get_or_create_direct_chat(4,5)
+        with self.db() as conn:
+            conn.execute('INSERT OR IGNORE INTO read_state(chat_id,user_id,last_read_msg_id) VALUES(?,?,0)',(cid,5))
+            before=[tuple(row) for row in conn.execute('SELECT * FROM read_state WHERE chat_id=?',(cid,))]
+            ids=[]
+            for i in range(53):
+                ids.append(conn.execute('INSERT INTO messages(chat_id,sender_id,text,created_at) VALUES(?,?,?,?)',
+                    (cid,4,'Retained moderation fixture '+str(i),server.now_iso())).lastrowid)
+            deleted=conn.execute('INSERT INTO messages(chat_id,sender_id,text,created_at,deleted) VALUES(?,?,?,?,1)',
+                (cid,4,'Deleted content must stay hidden',server.now_iso())).lastrowid
+            expired=conn.execute('INSERT INTO messages(chat_id,sender_id,text,created_at,expires_at) VALUES(?,?,?,?,?)',
+                (cid,4,'Expired content must stay hidden',server.now_iso(),time.time()-10)).lastrowid
+        self.assertEqual(self.client.get(f'/api/v2/chats/{cid}/messages',headers={'Authorization':'Bearer '+self.tokens[1]}).status_code,403)
+        with self.owner() as headers:
+            self.assertEqual(self.client.post(f'/api/admin/chats/{cid}/messages',headers=headers,json={'reason':'          '}).status_code,422)
+            reviewed=self.client.post(f'/api/admin/chats/{cid}/messages',headers=headers,json={'reason':'Investigating reported chat abuse'})
+            self.assertEqual(reviewed.status_code,200,reviewed.text)
+            data=reviewed.json()
+            self.assertEqual(len(data['items']),50)
+            self.assertTrue(data['has_more'])
+            self.assertNotIn(expired,{item['id'] for item in data['items']})
+            tombstone=next(item for item in data['items'] if item['id']==deleted)
+            self.assertEqual(tombstone['text'],'')
+            self.assertIsNone(tombstone['attachment_id'])
+            earlier=self.client.post(f'/api/admin/chats/{cid}/messages',headers=headers,
+                json={'reason':'Investigating reported chat abuse','before':data['before']}).json()
+            self.assertTrue(ids[0] in {item['id'] for item in earlier['items']})
+            self.assertFalse({item['id'] for item in earlier['items']} & {item['id'] for item in data['items']})
+            with self.db() as conn:
+                self.assertEqual([tuple(row) for row in conn.execute('SELECT * FROM read_state WHERE chat_id=?',(cid,))],before)
+                log=conn.execute("SELECT actor_id,reason FROM admin_audit WHERE action='messages_reviewed' AND target_id=? ORDER BY id DESC",(cid,)).fetchall()
+                self.assertEqual(len(log),2)
+                self.assertEqual(log[0]['actor_id'],1)
+                self.assertEqual(log[0]['reason'],'Investigating reported chat abuse')
+
+    def test_admin_media_and_status_review_excludes_expired_and_deleted_content(self):
+        from fastapi.responses import Response
+        import cloud_media
+        server=self.server;cid=server.get_or_create_direct_chat(4,5)
+        with self.db() as conn:
+            aid=conn.execute('INSERT INTO attachments(chat_id,user_id,name,path,mime,size) VALUES(?,?,?,?,?,?)',
+                (cid,4,'fixture.png','private-test-object.png','image/png',4)).lastrowid
+            mid=conn.execute('INSERT INTO messages(chat_id,sender_id,text,created_at,attachment_id) VALUES(?,?,?,?,?)',
+                (cid,4,'Media fixture',server.now_iso(),aid)).lastrowid
+            active=conn.execute('INSERT INTO statuses(user_id,text,created_at,expires_at,audience) VALUES(?,?,?,?,?)',
+                (4,'Private active status',server.now_iso(),time.time()+600,'nobody')).lastrowid
+            expired=conn.execute('INSERT INTO statuses(user_id,text,created_at,expires_at,audience) VALUES(?,?,?,?,?)',
+                (4,'Expired status',server.now_iso(),time.time()-10,'everyone')).lastrowid
+        self.assertEqual(self.client.get(f'/api/attachments/{aid}',headers={'Authorization':'Bearer '+self.tokens[1]}).status_code,403)
+        with self.owner() as headers:
+            statuses=self.client.post('/api/admin/statuses/review',headers=headers,json={'reason':'Investigating a status report'}).json()['items']
+            self.assertIn(active,{item['id'] for item in statuses})
+            self.assertNotIn(expired,{item['id'] for item in statuses})
+            self.assertTrue(all('path' not in item for item in statuses))
+            def audited_response(root,key,mime,headers,filename):
+                # An independent connection sees the committed audit BEFORE data retrieval.
+                with self.db() as conn:
+                    row=conn.execute("SELECT reason FROM admin_audit WHERE action='media_reviewed' AND target_id=? ORDER BY id DESC LIMIT 1",(aid,)).fetchone()
+                    self.assertEqual(row['reason'],'Investigating a shared file report')
+                self.assertEqual(key,'private-test-object.png')
+                return Response(b'test',media_type=mime,headers=headers)
+            with patch.object(cloud_media,'response',side_effect=audited_response) as retrieve:
+                response=self.client.post(f'/api/admin/media/attachment/{aid}/review',headers=headers,json={'reason':'Investigating a shared file report'})
+                self.assertEqual(response.status_code,200,response.text)
+                self.assertEqual(response.headers['cache-control'],'no-store')
+                with self.db() as conn:
+                    conn.execute('UPDATE messages SET deleted=1 WHERE id=?',(mid,))
+                self.assertEqual(self.client.post(f'/api/admin/media/attachment/{aid}/review',headers=headers,json={'reason':'Investigating a shared file report'}).status_code,404)
+                with self.db() as conn:
+                    conn.execute('UPDATE messages SET deleted=0,expires_at=? WHERE id=?',(time.time()-10,mid))
+                self.assertEqual(self.client.post(f'/api/admin/media/attachment/{aid}/review',headers=headers,json={'reason':'Investigating a shared file report'}).status_code,404)
+                self.assertEqual(retrieve.call_count,1)
+
+    def test_admin_review_fails_closed_when_the_audit_cannot_be_saved(self):
+        import cloud_media
+        server=self.server;cid=server.get_or_create_direct_chat(4,5)
+        original_db=server.get_db
+        class DeniedAuditConnection:
+            def __init__(self,conn):self.conn=conn
+            def __enter__(self):self.conn.__enter__();return self
+            def __exit__(self,*args):return self.conn.__exit__(*args)
+            def close(self):self.conn.close()
+            def execute(self,sql,args=()):
+                if sql.startswith('INSERT INTO admin_audit'):
+                    raise sqlite3.OperationalError('Audit storage unavailable in synthetic test')
+                return self.conn.execute(sql,args)
+        with self.owner() as headers, patch.object(server,'get_db',side_effect=lambda **kw:DeniedAuditConnection(original_db(**kw))), patch.object(cloud_media,'response') as retrieve:
+            response=self.client.post(f'/api/admin/chats/{cid}/messages',headers=headers,json={'reason':'Investigating a user report'})
+            self.assertEqual(response.status_code,503,response.text)
+            self.assertNotIn('Retained moderation fixture',response.text)
+            retrieve.assert_not_called()
+
+    def test_admin_account_actions_revoke_sessions_and_protect_the_owner(self):
+        server=self.server;password='Only a synthetic test password'
+        hashed,salt=server.hash_pw(password)
+        with self.db() as conn:
+            uid=conn.execute('INSERT INTO users(username,display_name,password_hash,salt,avatar_initial,created_at,verified_email,google_sub) VALUES(?,?,?,?,?,?,?,?)',
+                ('moderation_target','Moderation target',hashed,salt,'M',server.now_iso(),'moderation@gmail.com','moderation-google-sub')).lastrowid
+            conn.execute('INSERT INTO contacts(user_id,contact_id) VALUES(1,?)',(uid,))
+            sid=conn.execute('INSERT INTO statuses(user_id,text,created_at,expires_at,audience) VALUES(?,?,?,?,?)',
+                (uid,'Moderation target status',server.now_iso(),time.time()+600,'everyone')).lastrowid
+        token=server.create_session(uid);target_headers={'Authorization':'Bearer '+token}
+        cid=server.get_or_create_direct_chat(1,uid)
+        self.assertEqual(self.client.get('/api/me',headers=target_headers).status_code,200)
+        class FakeSocket:
+            closed=False
+            async def close(self,code):self.closed=code
+        socket=FakeSocket();wsid='owner-ban-test'
+        server.mgr.active[wsid]={'user_id':uid,'ws':socket,'chat_ids':set(),'token':token}
+        server.ONLINE.setdefault(uid,set()).add(wsid)
+        reason='Confirmed abuse report in test fixture'
+        with self.owner() as headers:
+            def action(path,body):return self.client.post(f'/api/admin/users/{uid}/'+path,headers=headers,json={'reason':reason,**body})
+            self.assertEqual(self.client.post('/api/admin/users/1/suspension',headers=headers,json={'reason':reason,'suspended':True}).status_code,400)
+            self.assertEqual(self.client.post('/api/admin/users/1/deletion',headers=headers,json={'reason':reason,'deleted':True,'username_confirmation':'author'}).status_code,400)
+            self.assertEqual(action('suspension',{'suspended':True}).status_code,200)
+            self.assertEqual(socket.closed,4401)
+            self.assertNotIn(wsid,server.mgr.active)
+            self.assertNotIn(uid,server.ONLINE)
+            self.assertEqual(self.client.get('/api/me',headers=target_headers).status_code,401)
+            self.assertEqual(self.client.post('/api/login',json={'username':'moderation_target','password':password}).status_code,403)
+            from google.oauth2 import id_token
+            with patch.object(id_token,'verify_oauth2_token',return_value={'sub':'moderation-google-sub','email':'moderation@gmail.com','email_verified':True}):
+                self.assertEqual(self.client.post('/api/auth/google',json={'credential':'test-google-token'}).status_code,403)
+            self.assertEqual(self.client.post(f'/api/chats/{cid}/messages',headers=headers,json={'text':'Should be unavailable'}).status_code,403)
+            self.assertEqual(self.client.post('/api/social/calls',headers=headers,json={'chat_id':cid}).status_code,403)
+            self.assertEqual(self.client.post(f'/api/chats/direct/{uid}',headers=headers).status_code,404)
+            self.assertEqual(self.client.get('/api/social/contact/moderation_target',headers=headers).status_code,404)
+            self.assertNotIn(uid,{u['id'] for u in self.client.get('/api/users/search?q=moderation_target',headers=headers).json()})
+            self.assertNotIn(sid,{s['id'] for s in self.call(1,'GET','/api/social/statuses')})
+            banned=self.client.get('/api/admin/users?state=banned',headers=headers).json()
+            self.assertIn(uid,{u['id'] for u in banned['items']})
+            self.assertEqual(action('suspension',{'suspended':False}).status_code,200)
+            login=self.client.post('/api/login',json={'username':'moderation_target','password':password})
+            self.assertEqual(login.status_code,200,login.text)
+            restored_token=login.json()['token']
+            self.assertEqual(action('deletion',{'deleted':True,'username_confirmation':'wrong_name'}).status_code,400)
+            self.assertEqual(action('deletion',{'deleted':True,'username_confirmation':'moderation_target'}).status_code,200)
+            self.assertEqual(self.client.get('/api/me',headers={'Authorization':'Bearer '+restored_token}).status_code,401)
+            self.assertEqual(self.client.post('/api/login',json={'username':'moderation_target','password':password}).status_code,403)
+            self.assertIn(uid,{u['id'] for u in self.client.get('/api/admin/users?state=deleted',headers=headers).json()['items']})
+            self.assertEqual(action('deletion',{'deleted':False,'username_confirmation':'moderation_target'}).status_code,200)
+            login=self.client.post('/api/login',json={'username':'moderation_target','password':password})
+            self.assertEqual(login.status_code,200,login.text)
+            restored_token=login.json()['token']
+            self.assertEqual(action('sign-out',{}).status_code,200)
+            self.assertEqual(self.client.get('/api/me',headers={'Authorization':'Bearer '+restored_token}).status_code,401)
+            audits=self.client.get('/api/admin/audit',headers=headers).json()['items']
+            self.assertTrue({'account_suspended','account_restored','account_deleted','deleted_account_restored','account_signed_out'}<={a['action'] for a in audits if a['target_id']==uid})
 
     def test_google_configuration_uses_the_deployed_public_id_and_environment_override(self):
         with patch.dict(os.environ, {'GOLDCHAT_GOOGLE_CLIENT_ID': ''}):

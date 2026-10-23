@@ -92,6 +92,22 @@ authForm.addEventListener('submit', async (e)=>{
 });
 
 /* ---------- Enter app ---------- */
+function clearSignedInState(){
+  TOKEN=null;ME=null;wsConnectedBefore=false;
+  localStorage.removeItem('gc_token');localStorage.removeItem('gc_me');
+  chats=[];activeChatId=null;replyTo=null;
+  if(typeof messageCache!=='undefined')messageCache.clear();
+  if(typeof ownerAdminAllowed!=='undefined')ownerAdminAllowed=false;
+  if(typeof closePanel==='function')closePanel();
+  if(typeof endCall==='function')endCall(false);
+  document.getElementById('messages').replaceChildren();
+  document.getElementById('chatView').style.display='none';
+  document.getElementById('emptyState').style.display='flex';
+  document.getElementById('sidebar').classList.remove('hidden');
+  composerInput.value='';
+  appEl.style.display='none';authWrap.style.display='flex';setMode('login');
+}
+
 async function enterApp(initialChats=null){
   document.getElementById('meAvatar').textContent = ME.avatar_initial;
   document.getElementById('meAvatar').style.background = avatarStyle(ME.username);
@@ -141,7 +157,7 @@ function connectWS(){
   ws.onclose = (ev)=>{
     wsAlive = false;
     document.getElementById('meStatus').textContent = 'Disconnected';
-    if (ev.code === 4401) { TOKEN=null; localStorage.removeItem('gc_token'); appEl.style.display='none'; authWrap.style.display='flex'; return; }
+    if (ev.code === 4401) { clearSignedInState(); return; }
     setTimeout(()=>{ if (TOKEN) connectWS(); }, 1500);
   };
   ws.onerror = ()=>{ try{ ws.close(); }catch(e){} };
@@ -557,14 +573,8 @@ document.getElementById('backBtn').addEventListener('click', ()=>{
 document.getElementById('logoutBtn').addEventListener('click', async ()=>{
   saveDraft();
   try { await request('/api/logout','POST'); } catch(e) { toast(e.message); return; }
-  localStorage.removeItem('gc_token');
-  localStorage.removeItem('gc_me');
-  TOKEN = null; ME = null;
-  wsConnectedBefore = false;
+  clearSignedInState();
   if (ws) ws.close();
-  appEl.style.display = 'none';
-  authWrap.style.display = 'flex';
-  setMode('login');
 });
 
 /* ---------- Bootstrap ---------- */
