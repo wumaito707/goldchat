@@ -22,7 +22,7 @@ Content and media review requires a reason of 10–500 characters. The audit mus
 
 Administrative deletion is **recoverable account disablement**, not permanent data erasure. Retained conversation history remains available for moderation. The interface requires the exact username before deletion or restoration and explains this retention.
 
-GOLDCHAT currently stores chats on its servers without end-to-end encryption. The sign-in screen, signed-in app and Privacy & admin access page disclose administrative access. Presence and read-receipt settings apply to other users; they do not prevent authorized moderation review.
+GOLDCHAT currently stores chats on its servers without end-to-end encryption. The sign-in screen and Privacy & admin access page disclose administrative access; the latter is also available from More. Presence and read-receipt settings apply to other users; they do not prevent authorized moderation review.
 
 ## Verification
 

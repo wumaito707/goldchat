@@ -52,12 +52,6 @@ const enterAppWithOwnerTools=enterApp;
 enterApp=async function(...args){
   ownerAdminAllowed=false;closePanel();
   await enterAppWithOwnerTools(...args);
-  if(!document.getElementById('privacyReminder')){
-    const note=document.createElement('div');note.id='privacyReminder';note.className='privacy-reminder';
-    note.innerHTML='GOLDCHAT stores chats on its servers. Authorized admins can review retained content for support and moderation. <button type="button">Privacy details</button>';
-    note.querySelector('button').onclick=showPrivacyData;
-    document.querySelector('.search-wrap').before(note);
-  }
   refreshOwnerAccess();
 };
 
