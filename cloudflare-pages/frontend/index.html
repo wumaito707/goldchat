@@ -8,9 +8,10 @@
 <meta name="theme-color" content="#d4af37">
 <link rel="manifest" href="/static/manifest.webmanifest">
 <link rel="apple-touch-icon" href="/static/icons/icon-192.png">
-<link rel="stylesheet" href="/static/styles.css?v=update-announcements-1">
+<link rel="stylesheet" href="/static/styles.css?v=original-design-1">
+<link rel="stylesheet" href="/static/experience.css?v=original-design-1">
 </head>
-<body>
+<body data-release="original-design-1">
 
 <!-- ===== Auth screen ===== -->
 <div class="auth-wrap" id="authWrap">
@@ -99,7 +100,6 @@
       <button type="button" class="mobile-nav-item" id="mobileUpdates"><span aria-hidden="true">◉</span><span>Updates</span></button>
       <button type="button" class="mobile-nav-item" id="mobileCommunities"><span aria-hidden="true">♧</span><span>Communities</span></button>
       <button type="button" class="mobile-nav-item" id="mobileCalls"><span aria-hidden="true">☎</span><span>Calls</span></button>
-      <button type="button" class="mobile-nav-item" id="mobileMore"><span aria-hidden="true">⋮</span><span>More</span></button>
     </nav>
   </aside>
 
@@ -160,15 +160,18 @@
 <div class="toast" id="toast"></div>
 <div id="modalRoot"></div>
 
-<script src="/static/app.js?v=update-announcements-1" defer></script>
-<script src="/static/features.js?v=owner-console-1" defer></script>
+<script src="/static/app.js?v=original-design-1" defer></script>
+<script src="/static/features.js?v=original-design-1" defer></script>
 <script src="/static/vendor/jsQR.js" defer></script>
-<script src="/static/social.js?v=status-audience-1" defer></script>
+<script src="/static/social.js?v=original-design-1" defer></script>
 <script src="/static/phone-permissions.js?v=full-polish-2" defer></script>
 <script src="/static/account-security.js?v=full-polish-2" defer></script>
-<script src="/static/update-announcements.js?v=update-announcements-1" defer></script>
-<script src="/static/admin.js?v=update-announcements-1" defer></script>
+<script src="/static/update-announcements.js?v=original-design-1" defer></script>
+<script src="/static/admin.js?v=original-design-1" defer></script>
 <script src="/static/google-signin.js?v=full-polish-2" defer></script>
+<script src="/static/experience.js?v=original-design-1" defer></script>
+<script src="/static/appearance.js?v=original-design-1" defer></script>
+<script src="/static/status-experience.js?v=original-design-1" defer></script>
 <script>if ('serviceWorker' in navigator) window.addEventListener('load',()=>navigator.serviceWorker.register('/service-worker.js').catch(()=>{}));</script>
 </body>
 </html>

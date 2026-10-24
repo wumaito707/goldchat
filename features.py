@@ -211,16 +211,20 @@ def install(app, b):
     def chats_for(uid):
         results=b['chat_list_for'](uid)
         with connection() as conn:
-            preferences={r['id']:r for r in conn.execute('SELECT c.id,c.owner_id,c.disappearing_seconds,p.pinned,p.archived,p.muted FROM chats c JOIN chat_members cm ON cm.chat_id=c.id LEFT JOIN chat_preferences p ON p.chat_id=c.id AND p.user_id=cm.user_id WHERE cm.user_id=?',(uid,))}
+            preferences={r['id']:r for r in conn.execute('SELECT c.id,c.owner_id,c.disappearing_seconds,p.pinned,p.archived,p.muted,p.hidden_through_id,p.manual_unread FROM chats c JOIN chat_members cm ON cm.chat_id=c.id LEFT JOIN chat_preferences p ON p.chat_id=c.id AND p.user_id=cm.user_id WHERE cm.user_id=?',(uid,))}
             for chat in results:
                 pref=preferences[chat['id']]
                 chat.update({k:pref[k] or 0 for k in ['pinned','archived','muted']})
                 chat['owner_id']=pref['owner_id']
                 chat['disappearing_seconds']=pref['disappearing_seconds']
+                if pref['manual_unread']:
+                    chat['unread']=max(1,chat['unread'])
                 if chat['type']!='direct':
                     chat['peer']=None
                     chat['peer_online']=False
         conn.close()
+        results=[chat for chat in results if preferences[chat['id']]['hidden_through_id'] is None or
+                 ((chat['last_message'] or {}).get('id') or 0)>preferences[chat['id']]['hidden_through_id']]
         return sorted(results,key=lambda c:not c['pinned'])
 
     @app.get('/api/v2/chats')
@@ -430,7 +434,7 @@ def install(app, b):
     def preferences(cid:int, body:PreferencesIn, token:str=Depends(b["session_token"])):
         uid=user(token); member(cid,uid)
         with connection() as conn:
-            conn.execute('INSERT INTO chat_preferences VALUES(?,?,?,?,?) ON CONFLICT(chat_id,user_id) DO UPDATE SET pinned=excluded.pinned, archived=excluded.archived, muted=excluded.muted',(cid,uid,body.pinned,body.archived,body.muted))
+            conn.execute('INSERT INTO chat_preferences(chat_id,user_id,pinned,archived,muted) VALUES(?,?,?,?,?) ON CONFLICT(chat_id,user_id) DO UPDATE SET pinned=excluded.pinned, archived=excluded.archived, muted=excluded.muted',(cid,uid,body.pinned,body.archived,body.muted))
         conn.close(); return {'ok':True}
 
     @app.post('/api/chats/{cid}/uploads')
@@ -554,7 +558,7 @@ def install(app, b):
     def stars(token:str=Depends(b["session_token"])):
         uid=user(token)
         with connection() as conn:
-            rows=conn.execute('SELECT m.* FROM stars s JOIN messages m ON m.id=s.message_id JOIN chat_members cm ON cm.chat_id=m.chat_id AND cm.user_id=s.user_id WHERE s.user_id=? ORDER BY m.id DESC',(uid,)).fetchall()
+            rows=conn.execute('SELECT m.* FROM stars s JOIN messages m ON m.id=s.message_id JOIN chat_members cm ON cm.chat_id=m.chat_id AND cm.user_id=s.user_id WHERE s.user_id=? AND NOT EXISTS(SELECT 1 FROM message_hidden h WHERE h.message_id=m.id AND h.user_id=?) ORDER BY m.id DESC',(uid,uid)).fetchall()
             result=[detail(r,uid,conn) for r in rows]
         conn.close(); return result
 
@@ -683,7 +687,7 @@ def install(app, b):
     def pins(cid:int,token:str=Depends(b["session_token"])):
         uid=user(token);member(cid,uid)
         with connection() as conn:
-            return [detail(r,uid,conn) for r in conn.execute('SELECT m.* FROM message_pins p JOIN messages m ON m.id=p.message_id WHERE p.chat_id=? AND m.deleted=0 ORDER BY m.id DESC',(cid,))]
+            return [detail(r,uid,conn) for r in conn.execute('SELECT m.* FROM message_pins p JOIN messages m ON m.id=p.message_id WHERE p.chat_id=? AND m.deleted=0 AND NOT EXISTS(SELECT 1 FROM message_hidden h WHERE h.message_id=m.id AND h.user_id=?) ORDER BY m.id DESC',(cid,uid))]
 
     @app.post('/api/chats/{cid}/import')
     async def import_messages(cid:int,body:ImportIn,token:str=Depends(b["session_token"])):

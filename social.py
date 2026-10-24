@@ -23,6 +23,7 @@ def init_schema(conn):
     CREATE TABLE IF NOT EXISTS call_history(id TEXT PRIMARY KEY,chat_id INTEGER NOT NULL REFERENCES chats(id),caller_id INTEGER NOT NULL REFERENCES users(id),callee_id INTEGER NOT NULL REFERENCES users(id),video INTEGER NOT NULL DEFAULT 0,status TEXT NOT NULL,created_at REAL NOT NULL,connected_at REAL,ended_at REAL);
     CREATE TABLE IF NOT EXISTS message_hidden(message_id INTEGER NOT NULL REFERENCES messages(id),user_id INTEGER NOT NULL REFERENCES users(id),PRIMARY KEY(message_id,user_id));
     CREATE TABLE IF NOT EXISTS status_views(status_id INTEGER NOT NULL,viewer_id INTEGER NOT NULL,viewed_at TEXT NOT NULL,PRIMARY KEY(status_id,viewer_id));
+    CREATE TABLE IF NOT EXISTS status_likes(status_id INTEGER NOT NULL,user_id INTEGER NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(status_id,user_id));
     CREATE INDEX IF NOT EXISTS idx_message_expiry ON messages(expires_at);
     CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id,id);
     ''')
@@ -43,7 +44,7 @@ def cleanup_expired(conn):
             statements.append((f'DELETE FROM {table} WHERE {col} IN ({marks})',expired))
         statements.append((f'UPDATE messages SET reply_to=NULL WHERE reply_to IN ({marks})',expired))
         statements.append((f'DELETE FROM messages WHERE id IN ({marks})',expired))
-    statements.extend([('DELETE FROM status_views WHERE status_id IN (SELECT id FROM statuses WHERE expires_at<=?)',(now,)),('DELETE FROM statuses WHERE expires_at<=?',(now,)),('DELETE FROM device_links WHERE expires_at<=?',(now,))])
+    statements.extend([('DELETE FROM status_views WHERE status_id IN (SELECT id FROM statuses WHERE expires_at<=?)',(now,)),('DELETE FROM status_likes WHERE status_id IN (SELECT id FROM statuses WHERE expires_at<=?)',(now,)),('DELETE FROM statuses WHERE expires_at<=?',(now,)),('DELETE FROM device_links WHERE expires_at<=?',(now,))])
     for row in data[2]:
         statements.append(("UPDATE call_history SET status='missed',ended_at=? WHERE id=?",(now,row['id'])))
         statements.append(("INSERT INTO notifications(user_id,kind,title,body,chat_id,created_at) VALUES(?,?,?,?,?,?)",(row['callee_id'],'call','Missed call',row['display_name']+' called',row['chat_id'],datetime.fromtimestamp(now,timezone.utc).isoformat())))
@@ -234,7 +235,7 @@ def install(app,b,hooks):
         user=uid(token)
         with db() as conn:
             result=[]
-            for row in conn.execute('SELECT s.*,u.username,u.display_name,u.avatar_initial,u.avatar_media_id FROM statuses s JOIN users u ON u.id=s.user_id WHERE s.expires_at>? ORDER BY s.id DESC',(time.time(),)):
+            for row in conn.execute('SELECT s.*,u.username,u.display_name,u.avatar_initial,u.avatar_media_id,EXISTS(SELECT 1 FROM status_likes l WHERE l.status_id=s.id AND l.user_id=?) AS liked FROM statuses s JOIN users u ON u.id=s.user_id WHERE s.expires_at>? ORDER BY s.id DESC',(user,time.time())):
                 if not can_status(user,row['user_id'],conn,row['audience']):continue
                 status=dict(row);media=conn.execute('SELECT * FROM social_media WHERE id=?',(row['media_id'],)).fetchone() if row['media_id'] else None
                 status['media']=media_public(media) if media else None;result.append(status)
@@ -244,7 +245,7 @@ def install(app,b,hooks):
     async def post_status(body:StatusIn,token:str=Depends(b["session_token"])):
         user=uid(token)
         if not body.text.strip() and not body.media_id:raise HTTPException(400,'Write text or choose a photo, video or audio file')
-        if body.background not in {'#82c9a9','#1f7a74','#7258a8','#b75e68','#bd893d','#263d59'} or body.font not in range(4):
+        if body.background not in {'#82c9a9','#1f7a74','#7258a8','#b75e68','#bd893d','#263d59','#528ff5','#8c4e81','#c3594c','#425b76','#192d36','#a08b56'} or body.font not in range(4):
             raise HTTPException(400,'Choose a supported status style')
         if body.audience is not None and body.audience not in {'everyone','contacts','nobody'}:raise HTTPException(400,'Choose a supported audience')
         deadline=time.time()+86400
@@ -270,6 +271,7 @@ def install(app,b,hooks):
             row=conn.execute('SELECT * FROM statuses WHERE id=? AND user_id=?',(sid,user)).fetchone()
             if not row:raise HTTPException(404,'Status not found')
             conn.execute('DELETE FROM status_views WHERE status_id=?',(sid,))
+            conn.execute('DELETE FROM status_likes WHERE status_id=?',(sid,))
             conn.execute('DELETE FROM statuses WHERE id=?',(sid,))
             if row['media_id']:conn.execute('UPDATE social_media SET expires_at=? WHERE id=?',(time.time(),row['media_id']))
         return {'ok':True}
@@ -290,8 +292,24 @@ def install(app,b,hooks):
         with db() as conn:
             row=conn.execute('SELECT user_id FROM statuses WHERE id=? AND expires_at>?',(sid,time.time())).fetchone()
             if not row or row['user_id']!=owner:raise HTTPException(404,'Status unavailable')
-            viewers=[{'id':r['id'],'display_name':r['display_name'],'viewed_at':r['viewed_at']} for r in conn.execute('SELECT u.id,u.display_name,v.viewed_at FROM status_views v JOIN users u ON u.id=v.viewer_id WHERE v.status_id=? ORDER BY v.viewed_at DESC',(sid,))]
+            viewers=[{'id':r['id'],'display_name':r['display_name'],'viewed_at':r['viewed_at'],'liked':bool(r['liked'])} for r in conn.execute('SELECT u.id,u.display_name,v.viewed_at,EXISTS(SELECT 1 FROM status_likes l WHERE l.status_id=v.status_id AND l.user_id=v.viewer_id) AS liked FROM status_views v JOIN users u ON u.id=v.viewer_id WHERE v.status_id=? ORDER BY v.viewed_at DESC',(sid,))]
         return {'count':len(viewers),'viewers':viewers}
+
+    @app.put('/api/social/statuses/{sid}/like')
+    async def like_status(sid:int,liked:bool=True,token:str=Depends(b['session_token'])):
+        viewer=uid(token)
+        with db() as conn:
+            row=conn.execute('SELECT user_id,audience FROM statuses WHERE id=? AND expires_at>?',(sid,time.time())).fetchone()
+            if not row or not can_status(viewer,row['user_id'],conn,row['audience']):
+                raise HTTPException(404,'Status unavailable')
+            if viewer==row['user_id']:
+                raise HTTPException(400,'You can like another person\'s status')
+            if liked:
+                conn.execute('INSERT OR IGNORE INTO status_likes(status_id,user_id,created_at) VALUES(?,?,?)',(sid,viewer,b['now_iso']()))
+                conn.execute('INSERT OR IGNORE INTO status_views(status_id,viewer_id,viewed_at) VALUES(?,?,?)',(sid,viewer,b['now_iso']()))
+            else:
+                conn.execute('DELETE FROM status_likes WHERE status_id=? AND user_id=?',(sid,viewer))
+        return {'liked':liked}
 
     @app.get('/api/social/notifications')
     def notifications(token:str=Depends(b["session_token"])):

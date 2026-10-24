@@ -22,6 +22,7 @@ try:
 except ImportError:
     sys.path.insert(0, str(Path(__file__).parent / "vendor"))
 import features
+import chat_management
 import social
 import account_security
 import admin_console
@@ -170,6 +171,7 @@ def init_db():
     );
     """)
     features.init_schema(conn)
+    chat_management.init_schema(conn)
     social.init_schema(conn)
     account_security.init_schema(conn)
     push_notifications.init_schema(conn)
@@ -402,7 +404,7 @@ def chat_list_for(user_id):
             WHERE cm.user_id!=? AND cm.chat_id IN (SELECT chat_id FROM chat_members WHERE user_id=?)''',
             (user_id,user_id,user_id,user_id,user_id)),
         ('SELECT m.* FROM messages m WHERE m.id=(SELECT MAX(m2.id) FROM messages m2 WHERE m2.chat_id=m.chat_id AND NOT EXISTS(SELECT 1 FROM message_hidden h WHERE h.message_id=m2.id AND h.user_id=?)) AND m.chat_id IN (SELECT chat_id FROM chat_members WHERE user_id=?)',(user_id, user_id)),
-        ('SELECT m.chat_id,COUNT(*) AS n FROM messages m JOIN chat_members cm ON cm.chat_id=m.chat_id AND cm.user_id=? LEFT JOIN read_state rs ON rs.chat_id=m.chat_id AND rs.user_id=? WHERE m.sender_id!=? AND m.id>COALESCE(rs.last_read_msg_id,0) GROUP BY m.chat_id',(user_id, user_id, user_id)),
+        ('SELECT m.chat_id,COUNT(*) AS n FROM messages m JOIN chat_members cm ON cm.chat_id=m.chat_id AND cm.user_id=? LEFT JOIN read_state rs ON rs.chat_id=m.chat_id AND rs.user_id=? WHERE m.sender_id!=? AND m.id>COALESCE(rs.last_read_msg_id,0) AND NOT EXISTS(SELECT 1 FROM message_hidden h WHERE h.message_id=m.id AND h.user_id=?) GROUP BY m.chat_id',(user_id, user_id, user_id, user_id)),
         ('SELECT cm.chat_id,MIN(COALESCE(rs.last_read_msg_id,0)) AS read_id,MIN(MAX(COALESCE(rs.last_delivered_msg_id,0),COALESCE(rs.last_read_msg_id,0))) AS delivered_id FROM chat_members cm LEFT JOIN read_state rs ON rs.chat_id=cm.chat_id AND rs.user_id=cm.user_id WHERE cm.user_id!=? AND cm.chat_id IN (SELECT chat_id FROM chat_members WHERE user_id=?) GROUP BY cm.chat_id',(user_id, user_id))
     ]
     data=conn.query_batch(queries) if hasattr(conn,"query_batch") else [conn.execute(sql,args).fetchall() for sql,args in queries]
@@ -705,6 +707,8 @@ def start_direct(user_id: int, token: str = Depends(session_token)):
     if not peer:
         conn.close(); raise HTTPException(404, "User not found")
     cid = get_or_create_direct_chat(u["id"], user_id)
+    conn.execute('UPDATE chat_preferences SET hidden_through_id=NULL WHERE chat_id=? AND user_id=?',(cid,u['id']))
+    conn.commit()
     conn.close()
     return {"chat_id": cid}
 
@@ -725,6 +729,7 @@ async def mark_read(chat_id: int, token: str = Depends(session_token)):
         last_delivered_msg_id=MAX(read_state.last_delivered_msg_id,excluded.last_delivered_msg_id)
     """, (chat_id, u["id"], last_id,last_id))
     conn.execute("UPDATE notifications SET read_at=? WHERE chat_id=? AND user_id=? AND kind='message' AND read_at IS NULL",(now_iso(),chat_id,u["id"]))
+    conn.execute('UPDATE chat_preferences SET manual_unread=0 WHERE chat_id=? AND user_id=?',(chat_id,u['id']))
     recipients=[r['user_id'] for r in conn.execute("SELECT user_id FROM chat_members WHERE chat_id=?",(chat_id,))]
     readable={recipient:read_receipts_visible(u['id'],recipient,conn) for recipient in recipients if recipient!=u['id']}
     conn.commit(); conn.close()
@@ -849,6 +854,7 @@ PUSH_MESSAGE = push_notifications.install(app, globals())
 SOCIAL_HOOKS = social.install(app, globals(),FEATURE_HOOKS)
 consume_registration = account_security.install(app, globals())
 ADMIN_HOOKS = admin_console.install(app, globals())
+chat_management.install(app, globals())
 
 # ---------- Static serving ----------
 # SPA fallback: serve index.html for non-API routes

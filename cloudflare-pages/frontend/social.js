@@ -1,7 +1,6 @@
 ﻿let notificationIds=new Set(),notificationAccount=null,notificationItems=[];
 let socialCleanup=null;
 let lastStatusRailAt=0;
-let statusRailExpiryTimer=null;
 const basePanel=panel,baseClosePanel=closePanel;
 function cleanSocialPanel(){if(socialCleanup){const fn=socialCleanup;socialCleanup=null;fn();}}
 panel=function(title,html,layout){cleanSocialPanel();return basePanel(title,html,layout);};
@@ -75,28 +74,10 @@ async function refreshStatusRail(providedRows=null){
     const rows=providedRows||await request('/api/social/statuses');
     if(!ME||ME.id!==uid)return;
     lastStatusRailAt=Date.now();
-    const rail=document.getElementById('storyRail');
-    if(!rail)return;
-    rail.innerHTML='';
-    const latest=new Map();
-    rows.filter(s=>s.expires_at*1000>Date.now()).forEach(s=>{if(!latest.has(s.user_id))latest.set(s.user_id,s);});
-    clearTimeout(statusRailExpiryTimer);
-    const nextExpiry=Math.min(...rows.map(s=>s.expires_at*1000).filter(time=>time>Date.now()));
-    if(Number.isFinite(nextExpiry))statusRailExpiryTimer=setTimeout(refreshStatusRail,Math.max(1000,nextExpiry-Date.now()+250));
-    const own=latest.get(uid);
-    const addStory=(s,mine=false)=>{
-      const button=document.createElement('button');
-      button.type='button';button.className='story-item'+(s?' has-story':'');
-      button.setAttribute('aria-label',mine?(s?'View my status':'Add my status'):'View '+s.display_name+' status');
-      const avatar=document.createElement('span');avatar.className='story-avatar';
-      avatar.innerHTML=avatarContent(mine?ME:s);
-      const label=document.createElement('span');label.className='story-label';label.textContent=mine?'My status':s.display_name;
-      button.append(avatar,label);
-      button.onclick=()=>showStatuses(mine&&!s?null:(mine?uid:s.user_id));
-      rail.appendChild(button);
-    };
-    addStory(own,true);
-    for(const [userId,s] of latest)if(userId!==uid)addStory(s);
+    // Updates has its own page; never put My status into the chat home.
+    document.getElementById('storyRail')?.replaceChildren();
+    const homeRail=document.getElementById('storyRail');if(homeRail)homeRail.hidden=true;
+    if(typeof updateStatusBadge==='function')updateStatusBadge(rows);
   }catch(error){console.error('Status updates could not load',error);}
 }
 document.addEventListener('visibilitychange',()=>{if(!document.hidden&&TOKEN&&Date.now()-lastStatusRailAt>60000)refreshStatusRail();});

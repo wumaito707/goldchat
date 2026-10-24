@@ -61,7 +61,7 @@ async function conversationMessages(cid,before=null) {
   const rows=[...new Map(pages.flat().map(m=>[m.id,m])).values()].sort((a,b)=>a.id-b.id);
   return {rows:rows.slice(-50),hasMore:pages.some(page=>page.length===50)||rows.length>50};
 }
-async function refreshMessages() {
+async function refreshMessages(markAsRead=true) {
   if (!activeChatId || !TOKEN) return;
   const cid=activeChatId, generation=++refreshGeneration;
   try {
@@ -79,7 +79,7 @@ async function refreshMessages() {
     rows.forEach(appendMessage);
     if (!rows.length) box.innerHTML='<div class="empty-list">'+(messageQuery?'No matching messages.':'Start the conversation.')+'</div>';
     if (!atBottom) box.scrollTop=oldScroll;
-    if (document.visibilityState==='visible' && !messageQuery) await markRead(cid);
+    if (markAsRead && document.visibilityState==='visible' && !messageQuery) await markRead(cid);
   } catch(e) { toast(e.message); }
 }
 async function loadOlder() {

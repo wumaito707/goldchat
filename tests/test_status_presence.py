@@ -6,7 +6,7 @@ import sqlite3
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -100,6 +100,7 @@ class StatusPresenceTest(unittest.TestCase):
         for method,path,body in paths:
             url='/api/admin/'+path
             self.assertEqual(self.client.request(method,url,json=body).status_code,401,url)
+
             denied=self.client.request(method,url,json=body,headers={'Authorization':'Bearer '+self.tokens[2]})
             self.assertEqual(denied.status_code,403,denied.text)
             self.assertEqual(denied.headers['cache-control'],'no-store')
@@ -122,6 +123,63 @@ class StatusPresenceTest(unittest.TestCase):
                 conn.execute('DELETE FROM admin_roles WHERE user_id=1')
             self.assertEqual(self.client.get('/api/admin/overview',headers=headers).status_code,403)
         self.assertFalse(self.call(1,'GET','/api/admin/access')['allowed'])
+
+    def test_bulk_chat_clear_is_personal_and_does_not_mark_messages_read(self):
+        chat=self.call(4,'POST','/api/groups',json={'title':'Personal clear regression','member_ids':[5]})
+        cid=chat.get('chat_id',chat.get('id'))
+        message=self.call(5,'POST',f'/api/chats/{cid}/messages',json={'text':'Keep this for the other member'})
+        self.call(4,'POST',f'/api/messages/{message["id"]}/star')
+        self.call(5,'POST',f'/api/messages/{message["id"]}/pin')
+        with patch.object(self.server.mgr,'send_to_user',new_callable=AsyncMock) as events:
+            self.call(4,'POST','/api/chats/bulk',json={'chat_ids':[cid],'action':'clear'})
+            events.assert_awaited_once_with(4,{'type':'personal_chats_changed','chat_ids':[cid],'action':'clear'})
+        self.assertEqual(self.call(4,'GET',f'/api/v2/chats/{cid}/messages'),[])
+        self.assertTrue(any(x['id']==message['id'] for x in self.call(5,'GET',f'/api/v2/chats/{cid}/messages')))
+        self.assertFalse(any(x['id']==message['id'] for x in self.call(4,'GET','/api/stars')))
+        self.assertEqual(self.call(4,'GET',f'/api/chats/{cid}/pins'),[])
+        mine=next(x for x in self.call(4,'GET','/api/v2/chats') if x['id']==cid)
+        self.assertEqual(mine['unread'],0)
+        with self.db() as conn:
+            state=conn.execute('SELECT last_read_msg_id FROM read_state WHERE chat_id=? AND user_id=4',(cid,)).fetchone()
+            self.assertTrue(state is None or state[0]<message['id'])
+
+    def test_bulk_delete_returns_on_new_messages_and_validates_all_memberships(self):
+        chat=self.call(4,'POST','/api/groups',json={'title':'Personal delete regression','member_ids':[5]})
+        cid=chat.get('chat_id',chat.get('id'))
+        self.call(5,'POST',f'/api/chats/{cid}/messages',json={'text':'Earlier message'})
+        bad=self.client.post('/api/chats/bulk',headers={'Authorization':'Bearer '+self.tokens[4]},json={'chat_ids':[cid,999999],'action':'delete'})
+        self.assertEqual(bad.status_code,403)
+        self.assertTrue(self.call(4,'GET',f'/api/v2/chats/{cid}/messages'))
+        self.call(4,'POST','/api/chats/bulk',json={'chat_ids':[cid],'action':'delete'})
+        self.assertNotIn(cid,[c['id'] for c in self.call(4,'GET','/api/v2/chats')])
+        self.assertIn(cid,[c['id'] for c in self.call(5,'GET','/api/v2/chats')])
+        message=self.call(5,'POST',f'/api/chats/{cid}/messages',json={'text':'A new message brings the chat back'})
+        self.assertIn(cid,[c['id'] for c in self.call(4,'GET','/api/v2/chats')])
+        self.assertEqual([m['id'] for m in self.call(4,'GET',f'/api/v2/chats/{cid}/messages')],[message['id']])
+        self.call(4,'POST',f'/api/chats/{cid}/read')
+        self.call(4,'POST','/api/chats/bulk',json={'chat_ids':[cid],'action':'mark_unread'})
+        self.assertEqual(next(c for c in self.call(4,'GET','/api/v2/chats') if c['id']==cid)['unread'],1)
+        self.call(4,'POST','/api/chats/bulk',json={'chat_ids':[cid],'action':'mark_read'})
+        self.assertEqual(next(c for c in self.call(4,'GET','/api/v2/chats') if c['id']==cid)['unread'],0)
+        self.call(4,'POST',f'/api/chats/{cid}/preferences',json={'muted':True,'archived':True,'pinned':True})
+
+    def test_status_likes_respect_audience_expiry_and_are_idempotent(self):
+        status=self.call(1,'POST','/api/social/statuses',json={'text':'Fresh blue status','background':'#528ff5','audience':'contacts'})
+        sid=status['id']
+        self.call(2,'PUT',f'/api/social/statuses/{sid}/like?liked=true')
+        self.call(2,'PUT',f'/api/social/statuses/{sid}/like?liked=true')
+        self.assertTrue(next(s for s in self.call(2,'GET','/api/social/statuses') if s['id']==sid)['liked'])
+        views=self.call(1,'GET',f'/api/social/statuses/{sid}/views')
+        self.assertEqual(views['count'],1)
+        self.assertTrue(views['viewers'][0]['liked'])
+        forbidden=self.client.put(f'/api/social/statuses/{sid}/like',headers={'Authorization':'Bearer '+self.tokens[3]})
+        self.assertEqual(forbidden.status_code,404)
+        self.call(2,'PUT',f'/api/social/statuses/{sid}/like?liked=false')
+        self.assertFalse(next(s for s in self.call(2,'GET','/api/social/statuses') if s['id']==sid)['liked'])
+        with self.db() as conn:
+            conn.execute('UPDATE statuses SET expires_at=? WHERE id=?',(time.time()-1,sid))
+        expired=self.client.put(f'/api/social/statuses/{sid}/like',headers={'Authorization':'Bearer '+self.tokens[2]})
+        self.assertEqual(expired.status_code,404)
 
     def test_update_announcements_expire_after_two_hours_without_expiring_notifications(self):
         import admin_console

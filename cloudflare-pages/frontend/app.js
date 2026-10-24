@@ -165,6 +165,7 @@ function connectWS(){
 }
 
 function handleWSEvent(d){
+  if (d.type === 'personal_chats_changed') { if(typeof refreshPersonalChats==='function')refreshPersonalChats(d);else loadChats();return; }
   if (d.type === 'announcements_changed') { refreshUpdateAnnouncement(); return; }
   if (d.type === 'profile_changed') { syncOwnProfile(); return; }
   if (d.type === 'notifications_changed') { refreshNotifications(true); return; }
@@ -267,12 +268,14 @@ function renderChatList(){
     if (chatListFilter==='unread' && !c.unread) return false;
     if (chatListFilter==='favorites' && !isFavoriteChat(c)) return false;
     if (['direct','group','channel'].includes(chatListFilter) && c.type!==chatListFilter) return false;
+    if (chatListFilter.startsWith('list:') && typeof chatInCustomList==='function' && !chatInCustomList(c,chatListFilter.slice(5))) return false;
     if (!q) return true;
     const name = c.type==='direct' && c.peer ? c.peer.display_name : (c.title||"");
     return name.toLowerCase().includes(q);
   });
   const filterLabels={all:'All',unread:'Unread',favorites:'Favorites',direct:'People',group:'Groups',channel:'Channels'};
   document.querySelectorAll('.chat-filter').forEach(button=>{
+    if (!filterLabels[button.dataset.filter]) return;
     const selected=button.dataset.filter===chatListFilter;
     button.classList.toggle('active',selected);
     button.setAttribute('aria-selected',String(selected));
@@ -287,6 +290,8 @@ function renderChatList(){
   for (const c of filtered){
     const el = document.createElement('div');
     el.className = 'chat-item' + (c.id===activeChatId ? ' active' : '');
+    el.dataset.chatId=c.id;el.tabIndex=0;el.setAttribute('role','button');
+    el.setAttribute('aria-label',(c.peer?.display_name||c.title||'Chat')+(c.unread?', '+c.unread+' unread':''));
     const last = c.last_message || {};
     const preview = last.sender_id === ME.id ? receiptMarkup(last.read,last.delivered)+' <span class="you-prefix">You: </span>' : '';
     const typingTag = c._typingPreview ? `<span style="color:var(--green)">typing…</span>` : `${preview}${escapeHtml(last.text||'')}`;
@@ -303,7 +308,9 @@ function renderChatList(){
           ${c.unread ? `<div class="unread-badge">${c.unread}</div>` : ''}
         </div>
       </div>`;
-    el.addEventListener('click', ()=> openChat(c.id));
+    if(typeof decorateChatRow==='function')decorateChatRow(el,c);
+    el.addEventListener('click', ()=> typeof chatSelection!=='undefined'&&chatSelection.active?toggleChatSelection(c.id):openChat(c.id));
+    el.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();el.click();}});
     list.appendChild(el);
   }
 }
