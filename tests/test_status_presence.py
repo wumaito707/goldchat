@@ -181,6 +181,26 @@ class StatusPresenceTest(unittest.TestCase):
         expired=self.client.put(f'/api/social/statuses/{sid}/like',headers={'Authorization':'Bearer '+self.tokens[2]})
         self.assertEqual(expired.status_code,404)
 
+    def test_startup_migrates_an_old_database_before_expiry_cleanup(self):
+        legacy_path=Path(self.temp.name)/'legacy-upgrade.db'
+        source=self.server.get_db(cleanup=False)
+        legacy=sqlite3.connect(legacy_path)
+        try:
+            source.backup(legacy)
+            legacy.execute('DROP TABLE status_likes')
+            legacy.execute('INSERT INTO statuses(user_id,text,created_at,expires_at) VALUES(?,?,?,?)',(1,'Expired before this upgrade',self.server.now_iso(),time.time()-10))
+            legacy.commit()
+        finally:
+            source.close()
+            legacy.close()
+        with patch.object(self.server,'DB_PATH',legacy_path),patch.object(self.server,'_last_expired_cleanup',0):
+            self.server.init_db()
+        migrated=sqlite3.connect(legacy_path)
+        try:
+            self.assertIsNotNone(migrated.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='status_likes'").fetchone())
+        finally:
+            migrated.close()
+
     def test_update_announcements_expire_after_two_hours_without_expiring_notifications(self):
         import admin_console
         from datetime import datetime,timezone

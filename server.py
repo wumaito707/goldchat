@@ -128,7 +128,9 @@ def get_verification_db():
     return get_db(cleanup=False)
 
 def init_db():
-    conn = get_db()
+    # Migrate before cleanup: an older deployment may not have the tables
+    # that the current expiry cleanup needs yet.
+    conn = get_db(cleanup=False)
     c = conn.cursor()
     c.executescript("""
     CREATE TABLE IF NOT EXISTS users (
