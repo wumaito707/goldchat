@@ -8,8 +8,9 @@ import social
 import cloud_media
 from contextlib import contextmanager
 from pathlib import Path
-from fastapi import HTTPException, Query, Depends
+from fastapi import HTTPException, Query, Depends, BackgroundTasks
 from fastapi.responses import FileResponse
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
 MAX_FILE_BYTES = 10 * 1024 * 1024
@@ -27,6 +28,7 @@ def init_schema(conn):
         ('messages', 'reply_to', 'INTEGER'),
         ('messages', 'attachment_id', 'INTEGER'),
         ('messages', 'forwarded', 'INTEGER NOT NULL DEFAULT 0'),
+        ('messages', 'client_id', 'TEXT'),
     ]:
         columns = {r[1] for r in conn.execute(f'PRAGMA table_info({table})')}
         if column not in columns:
@@ -46,6 +48,7 @@ def init_schema(conn):
     CREATE TABLE IF NOT EXISTS tasks (id INTEGER PRIMARY KEY, chat_id INTEGER NOT NULL REFERENCES chats(id), user_id INTEGER NOT NULL REFERENCES users(id), title TEXT NOT NULL, completed INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS message_pins (message_id INTEGER PRIMARY KEY REFERENCES messages(id), chat_id INTEGER NOT NULL REFERENCES chats(id), user_id INTEGER NOT NULL REFERENCES users(id));
     CREATE INDEX IF NOT EXISTS idx_messages_chat_id ON messages(chat_id,id);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_client_id ON messages(sender_id,client_id) WHERE client_id IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_members_user ON chat_members(user_id,chat_id);
     ''')
 
@@ -74,6 +77,7 @@ class MessageIn(BaseModel):
     text: str = Field(default='', max_length=10000)
     reply_to: int | None = None
     attachment_id: int | None = None
+    client_id: str | None = Field(default=None, min_length=1, max_length=100, pattern=r'^[A-Za-z0-9_-]+$')
 
 class PhoneContactsIn(BaseModel):
     emails:list[str]=Field(default_factory=list,max_length=100)
@@ -151,20 +155,22 @@ def install(app, b):
         return row
 
     def allowed_send(cid, uid):
-        member(cid, uid)
         with connection() as conn:
-            chat = conn.execute('SELECT * FROM chats WHERE id=?', (cid,)).fetchone()
-            if chat['type'] == 'channel' and chat['owner_id'] != uid:
-                raise HTTPException(403, 'Only the channel owner can post')
-            if chat['type']=='direct' and conn.execute('''SELECT 1 FROM chat_members cm JOIN users u ON u.id=cm.user_id
-                    WHERE cm.chat_id=? AND cm.user_id!=? AND (u.suspended_at IS NOT NULL OR u.deleted_at IS NOT NULL)''',(cid,uid)).fetchone():
-                raise HTTPException(403,'This account is currently unavailable')
-            blocked = conn.execute('''SELECT 1 FROM blocks b JOIN chat_members cm ON cm.user_id=b.blocked_id
-                WHERE cm.chat_id=? AND b.user_id=? UNION SELECT 1 FROM blocks b JOIN chat_members cm ON cm.user_id=b.user_id
-                WHERE cm.chat_id=? AND b.blocked_id=?''', (cid,uid,cid,uid)).fetchone()
-            if blocked and chat['type'] == 'direct':
-                raise HTTPException(403, 'Messaging is blocked for this contact')
-        conn.close()
+            chat = conn.execute('''SELECT c.*,
+                EXISTS(SELECT 1 FROM chat_members peer JOIN users u ON u.id=peer.user_id
+                    WHERE peer.chat_id=c.id AND peer.user_id!=? AND (u.suspended_at IS NOT NULL OR u.deleted_at IS NOT NULL)) AS unavailable,
+                EXISTS(SELECT 1 FROM blocks blocked JOIN chat_members peer ON peer.chat_id=c.id
+                    WHERE (blocked.user_id=? AND blocked.blocked_id=peer.user_id)
+                       OR (blocked.blocked_id=? AND blocked.user_id=peer.user_id)) AS blocked
+                FROM chats c JOIN chat_members own ON own.chat_id=c.id AND own.user_id=? WHERE c.id=?''',(uid,uid,uid,uid,cid)).fetchone()
+        if not chat:raise HTTPException(403,'You are not a member of this chat')
+        if chat['type']=='channel' and chat['owner_id']!=uid:
+            raise HTTPException(403,'Only the channel owner can post')
+        if chat['type']=='direct' and chat['unavailable']:
+            raise HTTPException(403,'This account is currently unavailable')
+        if chat['type']=='direct' and chat['blocked']:
+            raise HTTPException(403,'Messaging is blocked for this contact')
+        return chat
 
     def detail(row, uid, conn, cached=None):
         if cached is None:
@@ -186,7 +192,7 @@ def install(app, b):
             read=cached['read']
             delivered=cached['delivered']
             readable=cached['readable']
-        return {'id':row['id'], 'chat_id':row['chat_id'], 'sender':public(sender), 'text':'Message deleted' if row['deleted'] else row['text'],
+        return {'id':row['id'], 'chat_id':row['chat_id'], 'client_id':row['client_id'] if row['sender_id']==uid else None, 'sender':public(sender), 'text':'Message deleted' if row['deleted'] else row['text'],
             'time':b['fmt_time'](row['created_at']), 'iso':row['created_at'], 'mine':row['sender_id']==uid,
             'read':bool(row['sender_id']==uid and readable and read>=row['id']),
             'delivered':bool(row['sender_id']==uid and delivered>=row['id']),
@@ -194,19 +200,34 @@ def install(app, b):
             'reply':{'id':reply['id'],'text':'Message deleted' if reply['deleted'] else reply['text']} if reply else None,
             'reactions':[dict(r) for r in reacts], 'starred':starred}
 
-    async def changed(cid, event=None):
+    def change_recipients(cid):
         with connection() as conn:
             ids=[r['user_id'] for r in conn.execute('SELECT user_id FROM chat_members WHERE chat_id=?',(cid,))]
             latest=conn.execute('SELECT id,sender_id FROM messages WHERE chat_id=? ORDER BY id DESC LIMIT 1',(cid,)).fetchone()
-        conn.close()
+        return ids,dict(latest) if latest else None
+
+    async def changed(cid, event=None):
+        # Remote SQL must not hold the socket event loop while a user is typing.
+        ids,latest=await run_in_threadpool(change_recipients,cid)
+        if event and event.get('type')=='message':
+            latest={'id':event['id'],'sender_id':event['sender']['id']}
         delivered=False
         for uid in ids:
             sent=await manager.send_to_user(uid, event or {'type':'chat_changed','chat_id':cid})
+            if event and event.get('type')=='message':
+                # Older installed clients need a refresh for attachment/reply
+                # metadata. Current clients ignore this redundant hint by ID.
+                await manager.send_to_user(uid,{'type':'chat_changed','chat_id':cid,'message_id':event['id']})
             if sent and latest and uid!=latest['sender_id']:
-                delivered=bool(b['advance_delivery'](uid,cid,latest['id'])) or delivered
+                delivered=bool(await run_in_threadpool(b['advance_delivery'],uid,cid,latest['id'])) or delivered
         if delivered:
             for uid in ids:
                 await manager.send_to_user(uid, {'type':'delivery','chat_ids':[cid]})
+
+    async def message_notifications(mid):
+        recipients=await run_in_threadpool(b['SOCIAL_HOOKS']['notify_message'],mid)
+        for uid in recipients or []:
+            await manager.send_to_user(uid,{'type':'notifications_changed'})
 
     def chats_for(uid):
         results=b['chat_list_for'](uid)
@@ -478,21 +499,40 @@ def install(app, b):
         return cloud_media.response(uploads,row['path'],row['mime'],headers,filename=row['name'])
 
     @app.post('/api/chats/{cid}/messages')
-    async def send(cid:int, body:MessageIn, token:str=Depends(b["session_token"])):
-        uid=user(token); allowed_send(cid,uid)
+    def send(cid:int, body:MessageIn, background:BackgroundTasks, token:str=Depends(b["session_token"])):
+        account=auth(token);uid=account['id'];chat=allowed_send(cid,uid)
         text=body.text.strip()
         if not text and not body.attachment_id: raise HTTPException(400,'Write a message or attach a file')
         with connection() as conn:
-            if body.reply_to and not conn.execute('SELECT 1 FROM messages WHERE id=? AND chat_id=? AND deleted=0',(body.reply_to,cid)).fetchone():
+            # A retry after a lost response must return the original message.
+            # The transaction serializes simultaneous retries on every server.
+            if body.client_id:
+                conn.execute('BEGIN IMMEDIATE')
+                existing=conn.execute('SELECT * FROM messages WHERE sender_id=? AND client_id=?',(uid,body.client_id)).fetchone()
+                if existing:
+                    if existing['chat_id']!=cid or existing['text']!=text or existing['reply_to']!=body.reply_to or existing['attachment_id']!=body.attachment_id:
+                        raise HTTPException(409,'This send reference already belongs to a different message')
+                    return detail(existing,uid,conn)
+            reply=conn.execute('SELECT id,text,deleted FROM messages WHERE id=? AND chat_id=? AND deleted=0',(body.reply_to,cid)).fetchone() if body.reply_to else None
+            if body.reply_to and not reply:
                 raise HTTPException(400,'Reply must reference a message in this chat')
-            if body.attachment_id and not conn.execute('SELECT 1 FROM attachments WHERE id=? AND chat_id=? AND user_id=?',(body.attachment_id,cid,uid)).fetchone():
+            attachment=conn.execute('SELECT id,name,mime,size FROM attachments WHERE id=? AND chat_id=? AND user_id=?',(body.attachment_id,cid,uid)).fetchone() if body.attachment_id else None
+            if body.attachment_id and not attachment:
                 raise HTTPException(400,'Attachment must belong to you and this chat')
-            mid=conn.execute('INSERT INTO messages(chat_id,sender_id,text,created_at,reply_to,attachment_id,expires_at) VALUES(?,?,?,?,?,?,?)',(cid,uid,text,now(),body.reply_to,body.attachment_id,social.expiry_for(conn,cid))).lastrowid
-            row=conn.execute('SELECT * FROM messages WHERE id=?',(mid,)).fetchone()
+            expires=time.time()+chat['disappearing_seconds'] if chat['disappearing_seconds'] else None
+            row=conn.execute('INSERT INTO messages(chat_id,sender_id,text,created_at,reply_to,attachment_id,expires_at,client_id) VALUES(?,?,?,?,?,?,?,?) RETURNING *',(cid,uid,text,now(),body.reply_to,body.attachment_id,expires,body.client_id)).fetchone()
+            mid=row['id']
             if body.attachment_id and row['expires_at']:
                 conn.execute('UPDATE attachments SET expires_at=CASE WHEN expires_at IS NULL THEN ? ELSE MIN(expires_at,?) END WHERE id=?',(row['expires_at'],row['expires_at'],body.attachment_id))
-            result=detail(row,uid,conn)
-        conn.close(); b["SOCIAL_HOOKS"]["notify_message"](mid); await changed(cid)
+            # A new message cannot have peer receipts before it is committed.
+            # Reuse the validated rows rather than querying each relation again.
+            cached={'senders':{uid:account},'attachments':{body.attachment_id:attachment} if attachment else {},'replies':{body.reply_to:reply} if reply else {},'stars':set(),'reactions':{},'read':0,'delivered':0,'readable':False}
+            result=detail(row,uid,conn,cached)
+        # Return the saved message before notification work. Linked devices get
+        # its complete content, without a second chat/history round trip.
+        event={**result,'type':'message','mine':False,'read':False,'delivered':False,'starred':False}
+        background.add_task(changed,cid,event)
+        background.add_task(message_notifications,mid)
         return result
 
     @app.post('/api/messages/{mid}/forward')

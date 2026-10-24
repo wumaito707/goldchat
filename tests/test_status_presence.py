@@ -8,6 +8,7 @@ import time
 import unittest
 from unittest.mock import AsyncMock, patch
 from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -528,12 +529,90 @@ class StatusPresenceTest(unittest.TestCase):
             message = next(m for m in self.call(4, 'GET', f'/api/v2/chats/{cid}/messages') if m['id'] == mid)
             self.assertTrue(message['delivered'])
             self.assertFalse(message['read'])
-            self.assertTrue(any(event['type'] == 'chat_changed' for event in socket.events))
+            received=next(event for event in socket.events if event['type']=='message')
+            self.assertEqual(received['id'],mid)
+            self.assertEqual(received['text'],'Online delivery')
+            self.assertEqual(received['chat_id'],cid)
+            self.assertEqual(received['sender']['id'],4)
         finally:
             server.mgr.active.pop(ws_id, None)
             server.ONLINE.get(5, set()).discard(ws_id)
             if not server.ONLINE.get(5):
                 server.ONLINE.pop(5, None)
+
+    def test_message_retry_is_idempotent_and_broadcasts_content_before_notifications(self):
+        cid=self.call(4,'POST','/api/groups',json={'title':'Safe retry regression','member_ids':[5]})['chat_id']
+        body={'text':'Send this exactly once','client_id':'retry-regression-message'}
+        order=[]
+        async def deliver(uid,event):
+            order.append(('socket',uid,event))
+            return False
+        def notify(mid):order.append(('notification',mid))
+        with patch.object(self.server.mgr,'send_to_user',side_effect=deliver),patch.dict(self.server.SOCIAL_HOOKS,{'notify_message':notify}):
+            sent=self.call(4,'POST',f'/api/chats/{cid}/messages',json=body)
+            retry=self.call(4,'POST',f'/api/chats/{cid}/messages',json=body)
+        self.assertEqual(sent['id'],retry['id'])
+        self.assertEqual(sent['client_id'],body['client_id'])
+        self.assertEqual([event[0] for event in order],['socket','socket','socket','socket','notification'])
+        messages=[event for event in order[:-1] if event[2]['type']=='message']
+        self.assertEqual(len(messages),2)
+        for event in messages:
+            self.assertEqual(event[2]['type'],'message')
+            self.assertEqual(event[2]['text'],body['text'])
+            self.assertEqual(event[2]['client_id'],body['client_id'])
+            self.assertFalse(event[2]['starred'])
+        self.assertEqual(len([event for event in order[:-1] if event[2].get('message_id')==sent['id']]),2)
+        with self.db() as conn:
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM messages WHERE sender_id=4 AND client_id=?',(body['client_id'],)).fetchone()[0],1)
+        mismatch=self.client.post(f'/api/chats/{cid}/messages',headers={'Authorization':'Bearer '+self.tokens[4]},json={**body,'text':'Different text'})
+        self.assertEqual(mismatch.status_code,409)
+        own=next(m for m in self.call(4,'GET',f'/api/v2/chats/{cid}/messages') if m['id']==sent['id'])
+        peer=next(m for m in self.call(5,'GET',f'/api/v2/chats/{cid}/messages') if m['id']==sent['id'])
+        self.assertEqual(own['client_id'],body['client_id'])
+        self.assertIsNone(peer['client_id'])
+        # The send reference belongs to its authenticated sender.
+        theirs=self.call(5,'POST',f'/api/chats/{cid}/messages',json=body)
+        self.assertNotEqual(theirs['id'],sent['id'])
+
+    def test_message_retry_still_enforces_membership_blocks_and_channel_permissions(self):
+        group=self.call(4,'POST','/api/groups',json={'title':'Send permission regression','member_ids':[5]})['chat_id']
+        channel=self.call(4,'POST','/api/groups',json={'title':'Read only send regression','member_ids':[5],'kind':'channel'})['chat_id']
+        body={'text':'Permission test','client_id':'send-permission-regression'}
+        def denied(uid,cid,body=body,status=403):
+            response=self.client.post(f'/api/chats/{cid}/messages',headers={'Authorization':'Bearer '+self.tokens[uid]},json=body)
+            self.assertEqual(response.status_code,status,response.text)
+        denied(3,group)
+        denied(5,channel)
+        self.call(4,'POST',f'/api/chats/{channel}/messages',json=body)
+        denied(4,group,status=409)
+        denied(4,group,{**body,'client_id':'invalid reference!'},422)
+        direct=self.server.get_or_create_direct_chat(4,5)
+        with self.db() as conn:conn.execute('INSERT OR IGNORE INTO blocks(user_id,blocked_id) VALUES(5,4)')
+        try:denied(4,direct,{**body,'client_id':'blocked-message'})
+        finally:
+            with self.db() as conn:conn.execute('DELETE FROM blocks WHERE user_id=5 AND blocked_id=4')
+
+    def test_simultaneous_message_retries_commit_once(self):
+        cid=self.call(4,'POST','/api/groups',json={'title':'Concurrent send regression','member_ids':[5]})['chat_id']
+        def send(_):return self.call(4,'POST',f'/api/chats/{cid}/messages',json={'text':'One concurrent message','client_id':'concurrent-send-regression'})['id']
+        with ThreadPoolExecutor(max_workers=2) as workers:ids=list(workers.map(send,range(2)))
+        self.assertEqual(ids[0],ids[1])
+        with self.db() as conn:
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM messages WHERE sender_id=4 AND client_id=?',('concurrent-send-regression',)).fetchone()[0],1)
+
+    def test_saved_message_confirmation_includes_validated_reply_and_attachment(self):
+        cid=self.call(4,'POST','/api/groups',json={'title':'Message metadata regression','member_ids':[5]})['chat_id']
+        reply=self.call(5,'POST',f'/api/chats/{cid}/messages',json={'text':'Original message'})
+        with self.db() as conn:
+            attachment=conn.execute('INSERT INTO attachments(chat_id,user_id,name,path,mime,size) VALUES(?,?,?,?,?,?)',(cid,4,'voice.webm','synthetic-metadata-fixture','audio/webm',123)).lastrowid
+            conn.execute('UPDATE chats SET disappearing_seconds=86400 WHERE id=?',(cid,))
+        body={'text':'A reply with a voice note','reply_to':reply['id'],'attachment_id':attachment,'client_id':'metadata-confirmation-regression'}
+        sent=self.call(4,'POST',f'/api/chats/{cid}/messages',json=body)
+        self.assertEqual(sent['reply'],{'id':reply['id'],'text':'Original message'})
+        self.assertEqual(sent['attachment'],{'id':attachment,'name':'voice.webm','mime':'audio/webm','size':123})
+        self.assertAlmostEqual(sent['expires_at'],time.time()+86400,delta=5)
+        loaded=next(m for m in self.call(4,'GET',f'/api/v2/chats/{cid}/messages') if m['id']==sent['id'])
+        self.assertEqual(loaded,sent)
 
 
 if __name__ == '__main__':

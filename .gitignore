@@ -24,3 +24,4 @@ data/
 android-signing-private/
 
 .push-config.json*
+node_modules/

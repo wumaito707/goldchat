@@ -126,6 +126,7 @@ def install(app,b,hooks):
                 recipients.append(member[0])
         for recipient in recipients:
             if b.get('PUSH_MESSAGE'):b['PUSH_MESSAGE'](recipient,m['chat_id'])
+        return recipients
     def call_row(call_id,user):
         with db() as conn:row=conn.execute('SELECT * FROM call_history WHERE id=?',(call_id,)).fetchone()
         if not row or user not in (row['caller_id'],row['callee_id']):raise HTTPException(404,'Call not found')

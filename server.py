@@ -49,6 +49,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Quer
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
 BASE = Path(__file__).parent
@@ -763,7 +764,7 @@ async def ws_endpoint(websocket: WebSocket, token: str = Query("")):
         while True:
             raw = await websocket.receive_text()
             try:
-                auth_user(token)
+                await run_in_threadpool(auth_user,token)
             except HTTPException:
                 await websocket.close(code=4401)
                 break
@@ -777,9 +778,10 @@ async def ws_endpoint(websocket: WebSocket, token: str = Query("")):
                 t = data.get("type")
                 if t in {"subscribe", "message", "typing"}:
                     chat_id = int(data["chat_id"])
-                    require_member(chat_id, uid)
                     if t in {"message", "typing"}:
-                        FEATURE_HOOKS["allowed_send"](chat_id, uid)
+                        await run_in_threadpool(FEATURE_HOOKS["allowed_send"],chat_id,uid)
+                    else:
+                        await run_in_threadpool(require_member,chat_id,uid)
             except (ValueError, TypeError, KeyError, HTTPException):
                 await websocket.send_text(json.dumps({"type": "error", "message": "Invalid request or chat access denied"}))
                 continue

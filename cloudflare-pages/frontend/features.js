@@ -39,9 +39,9 @@ for(const [section,icon] of [['Chats','chats'],['Updates','updates'],['Communiti
   }
 }
 
-async function request(path, method='GET', body) {
+async function request(path, method='GET', body, options={}) {
   const response=await fetch(path, {
-    method, headers:{'Authorization':'Bearer '+TOKEN,...(body?{'Content-Type':'application/json'}:{})}, body:body?JSON.stringify(body):undefined
+    method, headers:{'Authorization':'Bearer '+TOKEN,...(body?{'Content-Type':'application/json'}:{})}, body:body?JSON.stringify(body):undefined,signal:options.signal
   });
   const data=await response.json();
   if (!response.ok) throw new Error(typeof data.detail==='string'?data.detail:'Please check your entries and try again.');
@@ -64,9 +64,17 @@ async function conversationMessages(cid,before=null) {
 async function refreshMessages(markAsRead=true) {
   if (!activeChatId || !TOKEN) return;
   const cid=activeChatId, generation=++refreshGeneration;
+  const knownIds=new Set(messageCache.keys());
   try {
-    const {rows,hasMore}=await conversationMessages(cid);
+    const page=await conversationMessages(cid),hasMore=page.hasMore;
     if (generation!==refreshGeneration || cid!==activeChatId) return;
+    // A history request may have started before a socket message arrived.
+    // Keep those new bubbles, plus our outbox, while applying its snapshot.
+    const ids=conversationIds(cid),merged=new Map(page.rows.map(m=>[m.id,m]));
+    for(const m of messageCache.values()){
+      if(!knownIds.has(m.id)&&!m.send_state&&ids.includes(m.chat_id)&&(!messageQuery||m.text.toLowerCase().includes(messageQuery.toLowerCase()))&&!merged.has(m.id))merged.set(m.id,m);
+    }
+    const rows=[...merged.values()].sort((a,b)=>a.id-b.id);
     const box=document.getElementById('messages');
     const atBottom=box.scrollHeight-box.scrollTop-box.clientHeight<100;
     const oldScroll=box.scrollTop;
@@ -77,7 +85,8 @@ async function refreshMessages(markAsRead=true) {
       older.onclick=()=>loadOlder(); box.appendChild(older);
     }
     rows.forEach(appendMessage);
-    if (!rows.length) box.innerHTML='<div class="empty-list">'+(messageQuery?'No matching messages.':'Start the conversation.')+'</div>';
+    renderOutgoingMessages(cid,rows);
+    if (!box.querySelector('.msg')) box.innerHTML='<div class="empty-list">'+(messageQuery?'No matching messages.':'Start the conversation.')+'</div>';
     if (!atBottom) box.scrollTop=oldScroll;
     if (markAsRead && document.visibilityState==='visible' && !messageQuery) await markRead(cid);
   } catch(e) { toast(e.message); }
@@ -453,8 +462,9 @@ async function sendFile(file,cid) {
   const base64=await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result).split(',')[1]);reader.onerror=()=>reject(new Error('Could not read file'));reader.readAsDataURL(file);});
   toast('Uploading '+file.name+'…');
   const uploaded=await request(`/api/chats/${cid}/uploads`,'POST',{name:file.name,data:base64,mime:file.type});
-  await request(`/api/chats/${cid}/messages`,'POST',{text:'',attachment_id:uploaded.id});
-  await onChatChanged(cid);toast('File sent');
+  const saved=await request(`/api/chats/${cid}/messages`,'POST',{text:'',attachment_id:uploaded.id,client_id:crypto.randomUUID()});
+  if(activeChatId&&conversationIds(activeChatId).includes(cid))appendMessage(saved);
+  loadChats();toast('File sent');
 }
 uploadInput.onchange=async()=>{const file=uploadInput.files[0],cid=activeChatId;uploadInput.value='';if(!file||!cid)return;try{await sendFile(file,cid);}catch(e){toast(e.message);}};
 let recorder=null,recordStarting=false,voiceRecordingStartedAt=0,voiceRecordingTicker=null;

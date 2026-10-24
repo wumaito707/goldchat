@@ -1,0 +1,6 @@
+{
+  "name": "goldchat-client-checks",
+  "private": true,
+  "scripts": { "test": "node --test messages.test.cjs" },
+  "devDependencies": { "linkedom": "0.18.14" }
+}

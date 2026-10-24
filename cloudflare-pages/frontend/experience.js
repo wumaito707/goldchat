@@ -41,6 +41,7 @@ function selectionChatIds(){return [...new Set([...chatSelection.ids].flatMap(co
 async function performBulk(actionName,ids=selectionChatIds()){
   if(!ids.length)throw new Error('Select at least one chat');
   await request('/api/chats/bulk','POST',{chat_ids:ids,action:actionName});
+  if(['clear','delete'].includes(actionName))discardOutgoingForChats(ids);
   if(['clear','delete','mark_unread'].includes(actionName)){
     messageCache.clear();
     if(ids.includes(activeChatId)){
@@ -51,6 +52,7 @@ async function performBulk(actionName,ids=selectionChatIds()){
   closePanel();endChatSelection();await loadChats();toast('Chats updated');
 }
 async function refreshPersonalChats(event){
+  if(['clear','delete'].includes(event.action))discardOutgoingForChats(event.chat_ids||[]);
   if(event.chat_ids?.includes(activeChatId)){
     if(['delete','mark_unread'].includes(event.action)){activeChatId=null;messageCache.clear();document.getElementById('chatView').style.display='none';document.getElementById('emptyState').style.display='flex';document.getElementById('sidebar').classList.remove('hidden');}
     else if(event.action==='clear')await refreshMessages(false);
@@ -147,8 +149,7 @@ document.getElementById('featuresMenu').onclick=showSettings;
 const settingsNav=document.getElementById('desktopMore');settingsNav.setAttribute('aria-label','Settings');settingsNav.title='Settings';settingsNav.innerHTML='<span>'+uiIcon('settings')+'</span><small>Settings</small>';
 const railProfile=document.createElement('button');railProfile.type='button';railProfile.className='desktop-nav-item rail-profile';railProfile.setAttribute('aria-label','Your profile');railProfile.title='Your profile';railProfile.appendChild(document.getElementById('meAvatar'));railProfile.onclick=runUI(showProfile);document.querySelector('.desktop-nav').appendChild(railProfile);
 const homeHeader=document.querySelector('.sidebar-header');homeHeader.insertAdjacentHTML('afterbegin','<h1 class="sidebar-brand">GOLD<span>CHAT</span></h1>');homeHeader.insertAdjacentHTML('beforeend',iconButton('homeCamera','camera','Post a photo or video status')+iconButton('desktopNewChat','plus','New chat','gold-circle')+iconButton('homeMenu','more','Chats menu'));
-homeHeader.insertAdjacentHTML('afterend','<div class="home-intro"><span class="eyebrow">YOUR CONVERSATIONS</span><h2>Your circle<span>.</span></h2><p>A good conversation starts here.</p></div>');
-document.querySelector('.desktop-nav').insertAdjacentHTML('afterbegin','<div class="rail-monogram" aria-hidden="true">G<span>•</span></div>');
+document.querySelector('.desktop-nav').insertAdjacentHTML('afterbegin','<div class="rail-logo"><img src="/static/icons/icon-192.png" alt="GOLDCHAT" width="48" height="48"></div>');
 document.getElementById('homeCamera').onclick=()=>runUI(()=>showStatusComposer('media'))();document.getElementById('homeMenu').onclick=homeMenu;document.getElementById('desktopNewChat').onclick=()=>document.getElementById('newChatBtn').click();
 document.querySelector('.search-box input').placeholder='Search or start a new chat';
 document.querySelector('.search-wrap').insertAdjacentHTML('beforebegin',`<div class="chat-selection-bar">${iconButton('cancelChatSelection','close','Cancel selection')}<strong id="selectionCount">0 selected</strong>${iconButton('selectionMenu','more','Selected chat actions')}</div>`);
