@@ -147,7 +147,7 @@ def install(app, b):
 
     def message_row(mid, uid):
         with connection() as conn:
-            row = conn.execute('SELECT * FROM messages WHERE id=?', (mid,)).fetchone()
+            row = conn.execute('SELECT * FROM active_messages WHERE id=?', (mid,)).fetchone()
             if not row:
                 raise HTTPException(404, 'Message not found')
         conn.close()
@@ -178,7 +178,7 @@ def install(app, b):
             reacts = conn.execute('SELECT emoji,COUNT(*) AS count FROM reactions WHERE message_id=? GROUP BY emoji', (row['id'],)).fetchall()
             starred = bool(conn.execute('SELECT 1 FROM stars WHERE message_id=? AND user_id=?', (row['id'],uid)).fetchone())
             attachment = conn.execute('SELECT id,name,mime,size FROM attachments WHERE id=?', (row['attachment_id'],)).fetchone() if row['attachment_id'] and not row['deleted'] else None
-            reply = conn.execute('SELECT id,text,deleted FROM messages WHERE id=?', (row['reply_to'],)).fetchone() if row['reply_to'] else None
+            reply = conn.execute('SELECT id,text,deleted FROM active_messages WHERE id=?', (row['reply_to'],)).fetchone() if row['reply_to'] else None
             receipt=b['chat_receipt_state'](conn,row['chat_id'],uid)
             read=receipt['read']
             delivered=receipt['delivered']
@@ -203,7 +203,7 @@ def install(app, b):
     def change_recipients(cid):
         with connection() as conn:
             ids=[r['user_id'] for r in conn.execute('SELECT user_id FROM chat_members WHERE chat_id=?',(cid,))]
-            latest=conn.execute('SELECT id,sender_id FROM messages WHERE chat_id=? ORDER BY id DESC LIMIT 1',(cid,)).fetchone()
+            latest=conn.execute('SELECT id,sender_id FROM active_messages WHERE chat_id=? ORDER BY id DESC LIMIT 1',(cid,)).fetchone()
         return ids,dict(latest) if latest else None
 
     async def changed(cid, event=None):
@@ -261,7 +261,7 @@ def install(app, b):
     def messages(cid: int, token: str = Depends(b["session_token"]), q: str = '', before: int | None = None):
         uid=user(token); member(cid,uid)
         with connection() as conn:
-            rows=conn.execute('SELECT * FROM messages WHERE chat_id=? AND NOT EXISTS(SELECT 1 FROM message_hidden h WHERE h.message_id=messages.id AND h.user_id=?) AND (? IS NULL OR id<?) AND (?=? OR (deleted=0 AND text LIKE ?)) ORDER BY id DESC LIMIT 50', (cid,uid,before,before,q,'','%'+q+'%')).fetchall()
+            rows=conn.execute('SELECT * FROM active_messages WHERE chat_id=? AND NOT EXISTS(SELECT 1 FROM message_hidden h WHERE h.message_id=active_messages.id AND h.user_id=?) AND (? IS NULL OR id<?) AND (?=? OR (deleted=0 AND text LIKE ?)) ORDER BY id DESC LIMIT 50', (cid,uid,before,before,q,'','%'+q+'%')).fetchall()
             def related(table,column,ids,select='*',extra='',args=()):
                 ids=list(set(v for v in ids if v is not None))
                 if not ids:return []
@@ -273,7 +273,7 @@ def install(app, b):
             cached={
                 'senders':{r['id']:r for r in related('users','id',[r['sender_id'] for r in rows])},
                 'attachments':{r['id']:r for r in related('attachments','id',[r['attachment_id'] for r in rows if not r['deleted']],'id,name,mime,size')},
-                'replies':{r['id']:r for r in related('messages','id',[r['reply_to'] for r in rows],'id,text,deleted')},
+                'replies':{r['id']:r for r in related('active_messages','id',[r['reply_to'] for r in rows],'id,text,deleted')},
                 'stars':{r['message_id'] for r in related('stars','message_id',[r['id'] for r in rows],'message_id','AND user_id=?',(uid,))},
                 'reactions':reactions,
             }
@@ -510,10 +510,12 @@ def install(app, b):
                 conn.execute('BEGIN IMMEDIATE')
                 existing=conn.execute('SELECT * FROM messages WHERE sender_id=? AND client_id=?',(uid,body.client_id)).fetchone()
                 if existing:
+                    if existing['expires_at'] is not None and existing['expires_at']<=time.time():
+                        raise HTTPException(404,'Message expired')
                     if existing['chat_id']!=cid or existing['text']!=text or existing['reply_to']!=body.reply_to or existing['attachment_id']!=body.attachment_id:
                         raise HTTPException(409,'This send reference already belongs to a different message')
                     return detail(existing,uid,conn)
-            reply=conn.execute('SELECT id,text,deleted FROM messages WHERE id=? AND chat_id=? AND deleted=0',(body.reply_to,cid)).fetchone() if body.reply_to else None
+            reply=conn.execute('SELECT id,text,deleted FROM active_messages WHERE id=? AND chat_id=? AND deleted=0',(body.reply_to,cid)).fetchone() if body.reply_to else None
             if body.reply_to and not reply:
                 raise HTTPException(400,'Reply must reference a message in this chat')
             attachment=conn.execute('SELECT id,name,mime,size FROM attachments WHERE id=? AND chat_id=? AND user_id=?',(body.attachment_id,cid,uid)).fetchone() if body.attachment_id else None
@@ -546,7 +548,7 @@ def install(app, b):
                 if not file or not cloud_media.exists(uploads,file['path']):raise HTTPException(404,'Attachment unavailable')
                 aid=conn.execute('INSERT INTO attachments(chat_id,user_id,name,path,mime,size) VALUES(?,?,?,?,?,?)',(body.chat_id,uid,file['name'],file['path'],file['mime'],file['size'])).lastrowid
             new_id=conn.execute('INSERT INTO messages(chat_id,sender_id,text,created_at,attachment_id,forwarded,expires_at) VALUES(?,?,?,?,?,1,?)',(body.chat_id,uid,source['text'],now(),aid,social.expiry_for(conn,body.chat_id))).lastrowid
-            row=conn.execute('SELECT * FROM messages WHERE id=?',(new_id,)).fetchone()
+            row=conn.execute('SELECT * FROM active_messages WHERE id=?',(new_id,)).fetchone()
             if aid:conn.execute('UPDATE attachments SET expires_at=? WHERE id=?',(row['expires_at'],aid))
             result=detail(row,uid,conn)
         b["SOCIAL_HOOKS"]["notify_message"](new_id)
@@ -598,7 +600,7 @@ def install(app, b):
     def stars(token:str=Depends(b["session_token"])):
         uid=user(token)
         with connection() as conn:
-            rows=conn.execute('SELECT m.* FROM stars s JOIN messages m ON m.id=s.message_id JOIN chat_members cm ON cm.chat_id=m.chat_id AND cm.user_id=s.user_id WHERE s.user_id=? AND NOT EXISTS(SELECT 1 FROM message_hidden h WHERE h.message_id=m.id AND h.user_id=?) ORDER BY m.id DESC',(uid,uid)).fetchall()
+            rows=conn.execute('SELECT m.* FROM stars s JOIN active_messages m ON m.id=s.message_id JOIN chat_members cm ON cm.chat_id=m.chat_id AND cm.user_id=s.user_id WHERE s.user_id=? AND NOT EXISTS(SELECT 1 FROM message_hidden h WHERE h.message_id=m.id AND h.user_id=?) ORDER BY m.id DESC',(uid,uid)).fetchall()
             result=[detail(r,uid,conn) for r in rows]
         conn.close(); return result
 
@@ -654,7 +656,7 @@ def install(app, b):
         with connection() as conn:
             cs=[dict(r) for r in conn.execute('SELECT c.* FROM chats c JOIN chat_members cm ON cm.chat_id=c.id WHERE cm.user_id=?',(uid,))]
             for c in cs:
-                c['messages']=[detail(r,uid,conn) for r in conn.execute('SELECT * FROM messages WHERE chat_id=? AND NOT EXISTS(SELECT 1 FROM message_hidden h WHERE h.message_id=messages.id AND h.user_id=?) ORDER BY id',(c['id'],uid))]
+                c['messages']=[detail(r,uid,conn) for r in conn.execute('SELECT * FROM active_messages WHERE chat_id=? AND NOT EXISTS(SELECT 1 FROM message_hidden h WHERE h.message_id=active_messages.id AND h.user_id=?) ORDER BY id',(c['id'],uid))]
             contacts=[public(r) for r in conn.execute('SELECT u.* FROM contacts c JOIN users u ON u.id=c.contact_id WHERE c.user_id=?',(uid,))]
         conn.close(); return {'format':'goldchat-export-v1','exported_at':now(),'profile':profile(auth(token)),'contacts':contacts,'chats':cs}
 
@@ -727,7 +729,7 @@ def install(app, b):
     def pins(cid:int,token:str=Depends(b["session_token"])):
         uid=user(token);member(cid,uid)
         with connection() as conn:
-            return [detail(r,uid,conn) for r in conn.execute('SELECT m.* FROM message_pins p JOIN messages m ON m.id=p.message_id WHERE p.chat_id=? AND m.deleted=0 AND NOT EXISTS(SELECT 1 FROM message_hidden h WHERE h.message_id=m.id AND h.user_id=?) ORDER BY m.id DESC',(cid,uid))]
+            return [detail(r,uid,conn) for r in conn.execute('SELECT m.* FROM message_pins p JOIN active_messages m ON m.id=p.message_id WHERE p.chat_id=? AND m.deleted=0 AND NOT EXISTS(SELECT 1 FROM message_hidden h WHERE h.message_id=m.id AND h.user_id=?) ORDER BY m.id DESC',(cid,uid))]
 
     @app.post('/api/chats/{cid}/import')
     async def import_messages(cid:int,body:ImportIn,token:str=Depends(b["session_token"])):

@@ -615,5 +615,58 @@ class StatusPresenceTest(unittest.TestCase):
         self.assertEqual(loaded,sent)
 
 
+    def test_profile_and_session_changes_take_effect_immediately(self):
+        import hashlib
+        original=self.call(4,'GET','/api/profile')
+        try:
+            self.call(4,'PATCH','/api/profile',json={'display_name':'Fresh profile','bio':'Fresh bio','privacy':'everyone'})
+            self.assertEqual(self.call(4,'GET','/api/profile')['display_name'],'Fresh profile')
+        finally:
+            self.call(4,'PATCH','/api/profile',json={k:original[k] for k in ('display_name','bio','privacy')})
+        token=self.server.create_session(4)
+        headers={'Authorization':'Bearer '+token}
+        self.assertEqual(self.client.get('/api/me',headers=headers).status_code,200)
+        self.call(4,'DELETE','/api/devices/'+hashlib.sha256(token.encode()).hexdigest())
+        self.assertEqual(self.client.get('/api/me',headers=headers).status_code,401)
+
+    def test_password_reset_immediately_revokes_previously_used_token(self):
+        password,salt=self.server.hash_pw('before-reset-password')
+        with self.db() as conn:
+            uid=conn.execute('INSERT INTO users(username,display_name,password_hash,salt,avatar_initial,created_at,verified_email) VALUES(?,?,?,?,?,?,?)',
+                ('reset_regression','Reset',password,salt,'R',self.server.now_iso(),'reset-regression@example.test')).lastrowid
+        token=self.server.create_session(uid)
+        headers={'Authorization':'Bearer '+token}
+        self.assertEqual(self.client.get('/api/me',headers=headers).status_code,200)
+        sent=[]
+        with patch.object(self.server.account_security,'delivery_ready',return_value=True), patch.object(self.server.account_security,'send_code',side_effect=lambda *args:sent.append(args)):
+            start=self.client.post('/api/auth/verification/start',json={'channel':'email','address':'reset-regression@example.test','purpose':'reset'})
+        self.assertEqual(start.status_code,200,start.text)
+        reset=self.client.post('/api/auth/password/reset',json={'challenge_id':start.json()['challenge_id'],'code':sent[-1][2],'password':'after-reset-password'})
+        self.assertEqual(reset.status_code,200,reset.text)
+        self.assertEqual(self.client.get('/api/me',headers=headers).status_code,401)
+
+    def test_expiry_is_enforced_before_cleanup_including_retries(self):
+        cid=self.call(4,'POST','/api/groups',json={'title':'Expiry regression','member_ids':[5]})['chat_id']
+        body={'text':'Expired secret','client_id':'expired-retry-regression'}
+        message=self.call(4,'POST',f'/api/chats/{cid}/messages',json=body)
+        reply=self.call(5,'POST',f'/api/chats/{cid}/messages',json={'text':'Permanent reply','reply_to':message['id']})
+        self.call(4,'POST',f"/api/messages/{message['id']}/star")
+        with self.db() as conn:
+            conn.execute('UPDATE messages SET expires_at=? WHERE id=?',(time.time()-1,message['id']))
+        self.server._last_expired_cleanup=time.monotonic()
+        for path in (f'/api/chats/{cid}/messages',f'/api/v2/chats/{cid}/messages',f'/api/v2/chats/{cid}/messages?q=Expired'):
+            self.assertFalse(any(m['id']==message['id'] for m in self.call(4,'GET',path)))
+        rows=self.call(4,'GET',f'/api/v2/chats/{cid}/messages')
+        self.assertIsNone(next(m for m in rows if m['id']==reply['id'])['reply'])
+        self.assertFalse(any(m['id']==message['id'] for m in self.call(4,'GET','/api/stars')))
+        self.assertFalse(any(m['id']==message['id'] for c in self.call(4,'GET','/api/export')['chats'] for m in c['messages']))
+        self.assertFalse(any(n['message_id']==message['id'] for n in self.call(5,'GET','/api/social/notifications')['items']))
+        headers={'Authorization':'Bearer '+self.tokens[4]}
+        self.assertEqual(self.client.post(f"/api/messages/{message['id']}/forward",json={'chat_id':cid},headers=headers).status_code,404)
+        self.assertEqual(self.client.post(f'/api/chats/{cid}/messages',json=body,headers=headers).status_code,404)
+        with self.db() as conn:
+            self.assertIsNotNone(conn.execute('SELECT id FROM messages WHERE id=?',(message['id'],)).fetchone())
+
+
 if __name__ == '__main__':
     unittest.main()

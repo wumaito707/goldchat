@@ -24,6 +24,9 @@ def init_schema(conn):
     CREATE TABLE IF NOT EXISTS message_hidden(message_id INTEGER NOT NULL REFERENCES messages(id),user_id INTEGER NOT NULL REFERENCES users(id),PRIMARY KEY(message_id,user_id));
     CREATE TABLE IF NOT EXISTS status_views(status_id INTEGER NOT NULL,viewer_id INTEGER NOT NULL,viewed_at TEXT NOT NULL,PRIMARY KEY(status_id,viewer_id));
     CREATE TABLE IF NOT EXISTS status_likes(status_id INTEGER NOT NULL,user_id INTEGER NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(status_id,user_id));
+    CREATE VIEW IF NOT EXISTS active_messages AS
+      SELECT * FROM messages
+      WHERE expires_at IS NULL OR expires_at > (julianday('now') - 2440587.5) * 86400.0;
     CREATE INDEX IF NOT EXISTS idx_message_expiry ON messages(expires_at);
     CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id,id);
     ''')
@@ -119,7 +122,7 @@ def install(app,b,hooks):
     def notify_message(mid):
         recipients=[]
         with db() as conn:
-            m=conn.execute('SELECT m.*,u.display_name FROM messages m JOIN users u ON u.id=m.sender_id WHERE m.id=?',(mid,)).fetchone()
+            m=conn.execute('SELECT m.*,u.display_name FROM active_messages m JOIN users u ON u.id=m.sender_id WHERE m.id=?',(mid,)).fetchone()
             if not m:return
             for member in conn.execute('SELECT user_id FROM chat_members WHERE chat_id=? AND user_id!=?',(m['chat_id'],m['sender_id'])):
                 alert(conn,member[0],'message',m['display_name'],m['text'][:180] or 'New attachment',m['chat_id'],mid)
@@ -316,8 +319,8 @@ def install(app,b,hooks):
     def notifications(token:str=Depends(b["session_token"])):
         user=uid(token)
         with db() as conn:
-            result=[dict(r) for r in conn.execute('SELECT n.* FROM notifications n WHERE user_id=? AND (chat_id IS NULL OR EXISTS(SELECT 1 FROM chat_members cm WHERE cm.chat_id=n.chat_id AND cm.user_id=?)) ORDER BY id DESC LIMIT 100',(user,user))]
-            unread=conn.execute('SELECT COUNT(*) FROM notifications WHERE user_id=? AND read_at IS NULL AND (chat_id IS NULL OR EXISTS(SELECT 1 FROM chat_members WHERE chat_id=notifications.chat_id AND user_id=?))',(user,user)).fetchone()[0]
+            result=[dict(r) for r in conn.execute('SELECT n.* FROM notifications n WHERE (message_id IS NULL OR EXISTS(SELECT 1 FROM active_messages m WHERE m.id=n.message_id)) AND user_id=? AND (chat_id IS NULL OR EXISTS(SELECT 1 FROM chat_members cm WHERE cm.chat_id=n.chat_id AND cm.user_id=?)) ORDER BY id DESC LIMIT 100',(user,user))]
+            unread=conn.execute('SELECT COUNT(*) FROM notifications WHERE (message_id IS NULL OR EXISTS(SELECT 1 FROM active_messages m WHERE m.id=notifications.message_id)) AND user_id=? AND read_at IS NULL AND (chat_id IS NULL OR EXISTS(SELECT 1 FROM chat_members WHERE chat_id=notifications.chat_id AND user_id=?))',(user,user)).fetchone()[0]
         return {'items':result,'unread':unread}
 
     @app.post('/api/social/notifications/read')
@@ -351,7 +354,7 @@ def install(app,b,hooks):
     @app.post('/api/social/messages/{mid}/hide')
     async def hide_message(mid:int,token:str=Depends(b["session_token"])):
         user=uid(token)
-        with db() as conn:row=conn.execute('SELECT * FROM messages WHERE id=?',(mid,)).fetchone()
+        with db() as conn:row=conn.execute('SELECT * FROM active_messages WHERE id=?',(mid,)).fetchone()
         if not row:raise HTTPException(404,'Message not found')
         b['require_member'](row['chat_id'],user)
         with db() as conn:
@@ -444,6 +447,7 @@ def install(app,b,hooks):
     def call_history(token:str=Depends(b["session_token"])):
         user=uid(token)
         with db() as conn:
+            cleanup_expired(conn)
             results=[]
             for row in conn.execute('SELECT * FROM call_history WHERE caller_id=? OR callee_id=? ORDER BY created_at DESC LIMIT 100',(user,user)):
                 result=dict(row);peer=conn.execute('SELECT * FROM users WHERE id=?',(row['callee_id'] if row['caller_id']==user else row['caller_id'],)).fetchone()

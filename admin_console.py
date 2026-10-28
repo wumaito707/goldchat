@@ -115,14 +115,7 @@ def install(app, b):
     def search_term(value):
         return '%'+value.strip().replace('!','!!').replace('%','!%').replace('_','!_')+'%'
 
-    def invalidate(uid):
-        with b['_auth_cache_lock']:
-            for key, entry in list(b['_auth_cache'].items()):
-                if entry[1]['id']==uid:
-                    b['_auth_cache'].pop(key,None)
-
     async def disconnect(uid):
-        invalidate(uid)
         for wsid,info in list(b['mgr'].active.items()):
             if info['user_id']==uid:
                 try:
@@ -328,8 +321,6 @@ def install(app, b):
             audit(conn,owner,'account_suspended' if body.suspended else 'account_restored','user',uid,body.reason)
         if body.suspended:
             await disconnect(uid)
-        else:
-            invalidate(uid)
         return {'ok':True,'suspended':body.suspended}
 
     @app.post('/api/admin/users/{uid}/sign-out')
@@ -360,8 +351,6 @@ def install(app, b):
             audit(conn,owner,'account_deleted' if body.deleted else 'deleted_account_restored','user',uid,body.reason)
         if body.deleted:
             await disconnect(uid)
-        else:
-            invalidate(uid)
         return {'ok':True,'deleted':body.deleted}
 
     return {'actor':actor}

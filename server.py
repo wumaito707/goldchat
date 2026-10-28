@@ -100,12 +100,6 @@ _cleanup_lock = threading.Lock()
 _last_expired_cleanup = 0.0
 _CLEANUP_INTERVAL_SECONDS = 300
 
-# Startup makes several authenticated requests at once. Reuse a fresh session
-# briefly so those requests do not each repeat the same remote Turso lookup.
-_auth_cache_lock = threading.Lock()
-_auth_cache = {}
-_AUTH_CACHE_SECONDS = 8
-
 @app.exception_handler(sqlite3.OperationalError)
 async def database_error(request: Request, error: sqlite3.OperationalError):
     logging.getLogger('uvicorn.error').error('Database operation failed: %s', str(error))
@@ -323,7 +317,7 @@ def advance_delivery(user_id, chat_id=None, message_id=None):
     conn = get_db(cleanup=False)
     try:
         rows = conn.execute("""SELECT cm.chat_id,
-            (SELECT MAX(id) FROM messages WHERE chat_id=cm.chat_id) AS newest,
+            (SELECT MAX(id) FROM active_messages WHERE chat_id=cm.chat_id) AS newest,
             COALESCE(rs.last_delivered_msg_id,0) AS delivered
             FROM chat_members cm LEFT JOIN read_state rs
             ON rs.chat_id=cm.chat_id AND rs.user_id=cm.user_id
@@ -399,15 +393,15 @@ def get_or_create_direct_chat(user_a, user_b):
 def chat_list_for(user_id):
     conn = get_db()
     queries=[
-        ('\n        SELECT c.*, (SELECT COUNT(*) FROM messages m WHERE m.chat_id=c.id) AS msg_count\n        FROM chats c\n        JOIN chat_members cm ON cm.chat_id=c.id\n        WHERE cm.user_id=?\n        ORDER BY (SELECT MAX(created_at) FROM messages m WHERE m.chat_id=c.id) DESC\n    ',(user_id,)),
+        ('\n        SELECT c.*, (SELECT COUNT(*) FROM active_messages m WHERE m.chat_id=c.id) AS msg_count\n        FROM chats c\n        JOIN chat_members cm ON cm.chat_id=c.id\n        WHERE cm.user_id=?\n        ORDER BY (SELECT MAX(created_at) FROM active_messages m WHERE m.chat_id=c.id) DESC\n    ',(user_id,)),
         ('''SELECT cm.chat_id,u.*,
             EXISTS(SELECT 1 FROM contacts c WHERE c.user_id=u.id AND c.contact_id=?) AS receipt_contact,
             EXISTS(SELECT 1 FROM blocks b WHERE (b.user_id=u.id AND b.blocked_id=?) OR (b.user_id=? AND b.blocked_id=u.id)) AS receipt_blocked
             FROM chat_members cm JOIN users u ON u.id=cm.user_id
             WHERE cm.user_id!=? AND cm.chat_id IN (SELECT chat_id FROM chat_members WHERE user_id=?)''',
             (user_id,user_id,user_id,user_id,user_id)),
-        ('SELECT m.* FROM messages m WHERE m.id=(SELECT MAX(m2.id) FROM messages m2 WHERE m2.chat_id=m.chat_id AND NOT EXISTS(SELECT 1 FROM message_hidden h WHERE h.message_id=m2.id AND h.user_id=?)) AND m.chat_id IN (SELECT chat_id FROM chat_members WHERE user_id=?)',(user_id, user_id)),
-        ('SELECT m.chat_id,COUNT(*) AS n FROM messages m JOIN chat_members cm ON cm.chat_id=m.chat_id AND cm.user_id=? LEFT JOIN read_state rs ON rs.chat_id=m.chat_id AND rs.user_id=? WHERE m.sender_id!=? AND m.id>COALESCE(rs.last_read_msg_id,0) AND NOT EXISTS(SELECT 1 FROM message_hidden h WHERE h.message_id=m.id AND h.user_id=?) GROUP BY m.chat_id',(user_id, user_id, user_id, user_id)),
+        ('SELECT m.* FROM active_messages m WHERE m.id=(SELECT MAX(m2.id) FROM active_messages m2 WHERE m2.chat_id=m.chat_id AND NOT EXISTS(SELECT 1 FROM message_hidden h WHERE h.message_id=m2.id AND h.user_id=?)) AND m.chat_id IN (SELECT chat_id FROM chat_members WHERE user_id=?)',(user_id, user_id)),
+        ('SELECT m.chat_id,COUNT(*) AS n FROM active_messages m JOIN chat_members cm ON cm.chat_id=m.chat_id AND cm.user_id=? LEFT JOIN read_state rs ON rs.chat_id=m.chat_id AND rs.user_id=? WHERE m.sender_id!=? AND m.id>COALESCE(rs.last_read_msg_id,0) AND NOT EXISTS(SELECT 1 FROM message_hidden h WHERE h.message_id=m.id AND h.user_id=?) GROUP BY m.chat_id',(user_id, user_id, user_id, user_id)),
         ('SELECT cm.chat_id,MIN(COALESCE(rs.last_read_msg_id,0)) AS read_id,MIN(MAX(COALESCE(rs.last_delivered_msg_id,0),COALESCE(rs.last_read_msg_id,0))) AS delivered_id FROM chat_members cm LEFT JOIN read_state rs ON rs.chat_id=cm.chat_id AND rs.user_id=cm.user_id WHERE cm.user_id!=? AND cm.chat_id IN (SELECT chat_id FROM chat_members WHERE user_id=?) GROUP BY cm.chat_id',(user_id, user_id))
     ]
     data=conn.query_batch(queries) if hasattr(conn,"query_batch") else [conn.execute(sql,args).fetchall() for sql,args in queries]
@@ -450,7 +444,7 @@ def chat_list_for(user_id):
 
 def messages_for(chat_id, user_id, limit=200):
     conn = get_db()
-    msgs = conn.execute("SELECT * FROM messages WHERE chat_id=? AND NOT EXISTS(SELECT 1 FROM message_hidden h WHERE h.message_id=messages.id AND h.user_id=?) ORDER BY id DESC LIMIT ?", (chat_id,user_id, limit)).fetchall()
+    msgs = conn.execute("SELECT * FROM active_messages WHERE chat_id=? AND NOT EXISTS(SELECT 1 FROM message_hidden h WHERE h.message_id=active_messages.id AND h.user_id=?) ORDER BY id DESC LIMIT ?", (chat_id,user_id, limit)).fetchall()
     msgs = list(reversed(msgs))
     receipt = chat_receipt_state(conn,chat_id,user_id)
     out = []
@@ -634,21 +628,18 @@ def require_member(chat_id: int, user_id: int):
 
 
 def auth_user(token: str):
+    # Read current state so revocation, account restrictions and profile edits
+    # take effect across all backend instances immediately after commit.
     token_hash = hashlib.sha256(token.encode()).hexdigest()
-    now = time.monotonic()
-    with _auth_cache_lock:
-        cached = _auth_cache.get(token_hash)
-        if cached and cached[0] > now:
-            return cached[1]
-    with get_db() as conn:
+    conn = get_db()
+    try:
         row = conn.execute("SELECT u.* FROM users u JOIN sessions s ON s.user_id=u.id WHERE s.token_hash=? AND s.expires_at>?", (token_hash,time.time())).fetchone()
-    conn.close()
+    finally:
+        conn.close()
     if row is None:
         raise HTTPException(401, "Invalid or expired session")
     if row['suspended_at'] is not None or row['deleted_at'] is not None:
         raise HTTPException(403,'This GOLDCHAT account is disabled. Contact support.')
-    with _auth_cache_lock:
-        _auth_cache[token_hash] = (now + _AUTH_CACHE_SECONDS, row)
     return row
 
 
@@ -658,8 +649,6 @@ async def logout(token: str = Depends(session_token)):
     with get_db() as conn:
         conn.execute("DELETE FROM sessions WHERE token_hash=?", (hashlib.sha256(token.encode()).hexdigest(),))
     conn.close()
-    with _auth_cache_lock:
-        _auth_cache.pop(hashlib.sha256(token.encode()).hexdigest(), None)
     # This token's sockets are closed; other signed-in devices stay online.
     for wsid, info in list(mgr.active.items()):
         if info.get("token") == token:
@@ -720,7 +709,7 @@ async def mark_read(chat_id: int, token: str = Depends(session_token)):
     u = auth_user(token)
     require_member(chat_id, u["id"])
     conn = get_db()
-    last = conn.execute("SELECT MAX(id) AS m FROM messages WHERE chat_id=?", (chat_id,)).fetchone()
+    last = conn.execute("SELECT MAX(id) AS m FROM active_messages WHERE chat_id=?", (chat_id,)).fetchone()
     last_id = last["m"] or 0
     previous=conn.execute("SELECT last_read_msg_id,last_delivered_msg_id FROM read_state WHERE chat_id=? AND user_id=?",(chat_id,u['id'])).fetchone()
     previous_read=previous['last_read_msg_id'] if previous else 0
@@ -876,7 +865,7 @@ def android_assetlinks():
 
 @app.get("/healthz")
 def health():
-    return {"ok": True}
+    return {"ok": True, "release": "session-expiry-2026-10-27", "commit": os.environ.get("RENDER_GIT_COMMIT", "")}
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
