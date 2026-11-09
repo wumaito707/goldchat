@@ -7,7 +7,7 @@ let refreshTimer=null;
 let messageQuery='';
 let oldestMessageId=null;
 let refreshRunning=false;
-let refreshAgain=false;
+const pendingChatChangeIds=new Set();
 
 function uiIcon(name){
   const paths={
@@ -107,18 +107,30 @@ async function loadOlder() {
   } catch(e) { toast(e.message); }
 }
 async function onChatChanged(cid) {
-  if (refreshRunning) { refreshAgain=true; return; }
+  if(!TOKEN||!ME)return;
+  const currentAccount=ME.id;
+  if(cid!=null)pendingChatChangeIds.add(cid);
+  if(refreshRunning)return;
   refreshRunning=true;
   try {
-    const previous=chats.find(c=>c.id===cid)?.last_message?.iso;
-    await loadChats();
-    const chat=chats.find(c=>c.id===cid);
-    if (activeChatId && conversationIds(activeChatId).includes(cid)) { const visibleChat=chats.find(c=>c.id===activeChatId); if(visibleChat) {document.getElementById('hName').textContent=visibleChat.title||visibleChat.peer?.display_name||'Chat'; if(visibleChat.peer)paintAvatar(document.getElementById('hAvatar'),visibleChat.peer); updateHeaderStatus();} await refreshMessages(); }
-    await refreshNotifications(true);
-  } finally {
-    refreshRunning=false;
-    if (refreshAgain) { refreshAgain=false; await onChatChanged(activeChatId); }
-  }
+    while(pendingChatChangeIds.size){
+      if(!TOKEN||ME?.id!==currentAccount){pendingChatChangeIds.clear();break;}
+      const changedIds=[...pendingChatChangeIds];
+      pendingChatChangeIds.clear();
+      await loadChats();
+      if(activeChatId && changedIds.some(id=>conversationIds(activeChatId).includes(id))){
+        const visibleChat=chats.find(c=>c.id===activeChatId);
+        if(visibleChat){
+          document.getElementById('hName').textContent=visibleChat.title||visibleChat.peer?.display_name||'Chat';
+          if(visibleChat.peer)paintAvatar(document.getElementById('hAvatar'),visibleChat.peer);
+          updateHeaderStatus();
+        }
+        await refreshMessages();
+      }
+      await refreshNotifications(true);
+    }
+  }catch(e){console.error('Could not refresh changed chats',e);}
+  finally {refreshRunning=false;}
 }
 function selectMainSection(section) {
   const names={Chats:['desktopChats','mobileChats'],Updates:['desktopUpdates','mobileUpdates'],Communities:['desktopCommunities','mobileCommunities'],Calls:['desktopCalls','mobileCalls'],More:['desktopMore','mobileMore']};
@@ -134,11 +146,11 @@ function closePanel() {
 function panel(title, html, layout='dialog') {
   const root=document.getElementById('modalRoot');
   if(!root.firstElementChild)panelReturnFocus=document.activeElement;
-  root.innerHTML=`<div class="modal-overlay ${layout==='page'?'page-overlay':''}"><section class="modal feature-panel ${layout==='page'?'feature-page':''}" role="dialog" aria-modal="true" aria-label="${escapeHtml(title)}"><div class="panel-heading"><h3>${escapeHtml(title)}</h3><button type="button" class="icon-btn" id="panelClose" aria-label="Close dialog">${uiIcon('close')}</button></div>${html}<p class="panel-error" id="panelError" role="alert"></p></section></div>`;
+  root.innerHTML=`<div class="modal-overlay ${layout==='page'?'page-overlay':''}"><section class="modal feature-panel ${layout==='page'?'feature-page':''}" role="dialog" aria-modal="${layout==='page'?'false':'true'}" aria-label="${escapeHtml(title)}"><div class="panel-heading"><h3>${escapeHtml(title)}</h3><button type="button" class="icon-btn" id="panelClose" aria-label="Close dialog">${uiIcon('close')}</button></div>${html}<p class="panel-error" id="panelError" role="alert"></p></section></div>`;
   root.querySelector('.modal-overlay').onclick=e=>{if(e.target===e.currentTarget) closePanel();};
   document.getElementById('panelClose').onclick=closePanel;
   root.onkeydown=e=>{
-    if(e.key!=='Tab')return;
+    if(e.key!=='Tab'||layout==='page')return;
     const controls=[...root.querySelectorAll('button:not(:disabled),a[href],input:not(:disabled),textarea:not(:disabled),select:not(:disabled),[tabindex="0"]')].filter(el=>el.getClientRects().length);
     const first=controls[0],last=controls[controls.length-1];
     if(e.shiftKey&&document.activeElement===first){e.preventDefault();last?.focus();}

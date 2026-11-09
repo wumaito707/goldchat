@@ -34,24 +34,98 @@ async function hydrateSocialWidgets(){
   else if(params.get('contact'))await showScannedContact(params.get('contact'));
   else if(/^\d+$/.test(params.get('chat')||'')){await loadChats();await openChat(Number(params.get('chat')));}
 }
+let notificationRefreshPromise=null,notificationRefreshQueued=false;
+function showIncomingMessagePopup(notification,chat,body){
+  let tray=document.getElementById('incomingMessageAlerts');
+  if(!tray){
+    tray=document.createElement('div');
+    tray.id='incomingMessageAlerts';
+    tray.className='incoming-message-alerts';
+    tray.setAttribute('aria-live','polite');
+    document.body.appendChild(tray);
+  }
+  const popup=document.createElement('div');
+  popup.className='incoming-message-popup';
+  const avatar=document.createElement('span');
+  avatar.className='incoming-message-avatar';
+  if(chat?.peer)paintAvatar(avatar,chat.peer);
+  else avatar.textContent=String(notification.title||chat?.title||'G').trim().charAt(0).toUpperCase()||'G';
+  const open=document.createElement('button');
+  open.type='button';
+  open.className='incoming-message-open';
+  open.setAttribute('aria-label','Open message from '+String(notification.title||'contact'));
+  const title=document.createElement('strong');
+  title.textContent=String(notification.title||chat?.title||'New message');
+  const preview=document.createElement('span');
+  preview.textContent=String(body||'New message');
+  open.append(title,preview);
+  const dismiss=document.createElement('button');
+  dismiss.type='button';
+  dismiss.className='incoming-message-dismiss';
+  dismiss.setAttribute('aria-label','Dismiss message alert');
+  dismiss.textContent='×';
+  const close=()=>{clearTimeout(popup._timer);popup.remove();};
+  open.onclick=()=>{close();openNotification(notification);};
+  dismiss.onclick=close;
+  popup.append(avatar,open,dismiss);
+  tray.prepend(popup);
+  popup._timer=setTimeout(close,6500);
+  while(tray.children.length>3){
+    const oldest=tray.lastElementChild;
+    clearTimeout(oldest._timer);
+    oldest.remove();
+  }
+}
 async function refreshNotifications(notify=false){
-  if(!TOKEN||!ME)return;
-  try{
-    if(notificationAccount!==ME.id){notificationIds.clear();notificationAccount=ME.id;notify=false;}
-    const data=await request('/api/social/notifications');notificationItems=data.items;
-    const bell=document.getElementById('notificationBell');if(bell){bell.textContent='🔔'+(data.unread?' '+data.unread:'');bell.setAttribute('aria-label',data.unread+' unread notifications');}
-    let newStatus=false;
-    for(const n of data.items){const fresh=!notificationIds.has(n.id);notificationIds.add(n.id);if(fresh&&n.kind==='status')newStatus=true;if(!notify||!fresh||n.read_at)continue;
-      const chat=chats.find(c=>c.id===n.chat_id);
-      const category=chat?.type==='group'?'gc_notify_group':chat?.type==='channel'?'gc_notify_channel':'gc_notify_direct';
-      if((n.kind==='status'&&!settingOn('gc_notify_status',false))||(n.kind==='message'&&!settingOn(category))||chat?.muted)continue;
-      const body=settingOn('gc_notify_preview')?n.body:'New message';
-      if(document.hidden && 'Notification' in window && Notification.permission==='granted' && localStorage.getItem('gc_notifications')==='on'){
-        try{const registration=await navigator.serviceWorker.ready;await registration.showNotification(n.title,{body,tag:'goldchat-chat-'+(n.chat_id||n.id),icon:'/static/icons/icon-192.png',data:{url:'/?chat='+(n.chat_id||'')}});if(settingOn('gc_notify_sound',false))playNotificationSound();}catch(e){console.error('Phone notification failed');}
-      }else if(n.chat_id!==activeChatId || n.kind!=='message'){toast(n.title+': '+body);if(settingOn('gc_notify_sound',false))playNotificationSound();}
+  if(!TOKEN||!ME||navigator.onLine===false)return;
+  if(notificationRefreshPromise){
+    if(notify)notificationRefreshQueued=true;
+    return notificationRefreshPromise;
+  }
+  const currentToken=TOKEN,currentAccount=ME.id;
+  notificationRefreshPromise=(async()=>{
+    try{
+      if(notificationAccount!==currentAccount){notificationIds.clear();notificationAccount=currentAccount;notify=false;}
+      const data=await request('/api/social/notifications');
+      if(TOKEN!==currentToken||ME?.id!==currentAccount)return;
+      notificationItems=Array.isArray(data.items)?data.items:[];
+      const bell=document.getElementById('notificationBell');
+      if(bell){bell.textContent='🔔'+(data.unread?' '+data.unread:'');bell.setAttribute('aria-label',(data.unread||0)+' unread notifications');}
+      let newStatus=false;
+      for(const n of notificationItems){
+        const fresh=!notificationIds.has(n.id);
+        notificationIds.add(n.id);
+        if(notificationIds.size>1500)notificationIds.delete(notificationIds.values().next().value);
+        if(fresh&&n.kind==='status')newStatus=true;
+        if((!notify&&!notificationRefreshQueued)||!fresh||n.read_at)continue;
+        const chat=chats.find(c=>c.id===n.chat_id);
+        const category=chat?.type==='group'?'gc_notify_group':chat?.type==='channel'?'gc_notify_channel':'gc_notify_direct';
+        if((n.kind==='status'&&!settingOn('gc_notify_status',false))||(n.kind==='message'&&!settingOn(category))||chat?.muted)continue;
+        const body=settingOn('gc_notify_preview')?n.body:'New message';
+        if(document.hidden && 'Notification' in window && Notification.permission==='granted' && localStorage.getItem('gc_notifications')==='on'){
+          try{
+            const registration=await navigator.serviceWorker.ready;
+            if(TOKEN!==currentToken||ME?.id!==currentAccount)return;
+            await registration.showNotification(n.title,{body,tag:'goldchat-chat-'+(n.chat_id||n.id),icon:'/static/icons/icon-192.png',data:{url:'/?chat='+(n.chat_id||'')}});
+            if(settingOn('gc_notify_sound',false))playNotificationSound();
+          }catch(e){console.error('Phone notification failed',e);}
+        }else if(n.chat_id!==activeChatId || n.kind!=='message' || document.querySelector('#modalRoot .modal-overlay')){
+          if(n.kind==='message')showIncomingMessagePopup(n,chat,body);
+          else toast(String(n.title||'GOLDCHAT')+': '+String(body||''));
+          if(settingOn('gc_notify_sound',false))playNotificationSound();
+        }
+      }
+      if(newStatus&&(notify||notificationRefreshQueued))refreshStatusRail();
+    }catch(e){console.error('Notification update failed',e);}
+  })();
+  try{return await notificationRefreshPromise;}
+  finally{
+    notificationRefreshPromise=null;
+    if(notificationRefreshQueued){
+      notificationRefreshQueued=false;
+      refreshNotifications(true);
     }
-    if(newStatus&&notify)refreshStatusRail();
-  }catch(e){console.error('Notification update failed',e);}
+  }
 }
 function playNotificationSound(){try{const audio=new Audio('data:audio/wav;base64,UklGRjIAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQ4AAAAAAP8AAP8AAP8AAP8AAP8A');audio.volume=.15;audio.play().catch(()=>{});}catch(e){}}
 async function openNotification(n){try{await request('/api/social/notifications/'+n.id+'/read','POST');closePanel();await refreshNotifications();if(n.kind==='status')await showStatuses();else if(n.kind==='device')await showDevices();else if(n.kind==='call')await showCallHistory();else if(n.chat_id){await loadChats();await openChat(n.chat_id);}}catch(e){toast(e.message);}}

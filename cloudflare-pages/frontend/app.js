@@ -100,6 +100,13 @@ function clearSignedInState(){
   outgoingMessages.clear();typingSentAt.clear();
   receivedMessageIds.clear();
   Object.values(typingTimers).forEach(clearTimeout);typingTimers={};
+  clearTimeout(wsReconnectTimer);wsReconnectTimer=null;wsReconnectAttempt=0;
+  clearTimeout(receiptRefreshTimer);receiptRefreshTimer=null;receiptNeedsMessageRefresh=false;
+  clearTimeout(typingListRenderTimer);typingListRenderTimer=null;
+  if(ws?.close){try{ws.close();}catch(e){}}
+  ws=null;wsAlive=false;
+  document.getElementById('incomingMessageAlerts')?.remove();
+  if(typeof pendingChatChangeIds!=='undefined')pendingChatChangeIds.clear();
   TOKEN=null;ME=null;wsConnectedBefore=false;
   localStorage.removeItem('gc_token');localStorage.removeItem('gc_me');
   chats=[];activeChatId=null;replyTo=null;
@@ -145,31 +152,66 @@ async function enterApp(initialChats=null){
 }
 
 /* ---------- WebSocket ---------- */
-function connectWS(){
-  const apiUrl = new URL(API || location.origin);
-  const proto = apiUrl.protocol === 'https:' ? 'wss' : 'ws';
-  ws = new WebSocket(`${proto}://${apiUrl.host}/ws`);
-  ws.onopen = ()=>{
-    wsAlive = true;
-    document.getElementById('meStatus').textContent = 'Connected';
-    if (activeChatId) { wsSend({type:'subscribe',chat_id:activeChatId}); refreshMessages(); }
-    // The initial chat list was already loaded during startup. Refresh only
-    // after a reconnect, when messages may have arrived while offline.
-    if (wsConnectedBefore) {loadChats();refreshUpdateAnnouncement();}
-    wsConnectedBefore = true;
-  };
-  ws.onmessage = (ev)=>{
-    const data = JSON.parse(ev.data);
-    handleWSEvent(data);
-  };
-  ws.onclose = (ev)=>{
-    wsAlive = false;
-    document.getElementById('meStatus').textContent = 'Disconnected';
-    if (ev.code === 4401) { clearSignedInState(); return; }
-    setTimeout(()=>{ if (TOKEN) connectWS(); }, 1500);
-  };
-  ws.onerror = ()=>{ try{ ws.close(); }catch(e){} };
+let wsReconnectTimer=null,wsReconnectAttempt=0;
+let receiptRefreshTimer=null,receiptNeedsMessageRefresh=false;
+let typingListRenderTimer=null;
+function scheduleReceiptRefresh(needsMessageRefresh=false){
+  receiptNeedsMessageRefresh ||= needsMessageRefresh;
+  clearTimeout(receiptRefreshTimer);
+  receiptRefreshTimer=setTimeout(()=>{
+    receiptRefreshTimer=null;
+    const reload=receiptNeedsMessageRefresh;receiptNeedsMessageRefresh=false;
+    if(!TOKEN)return;
+    loadChats();
+    if(reload&&activeChatId)refreshMessages(false);
+  },220);
 }
+function scheduleTypingListRender(){
+  if(typingListRenderTimer)return;
+  typingListRenderTimer=setTimeout(()=>{
+    typingListRenderTimer=null;
+    if(TOKEN)renderChatList();
+  },80);
+}
+function connectWS(){
+  if(!TOKEN||!ME||navigator.onLine===false)return;
+  if(ws&&(ws.readyState===WebSocket.CONNECTING||ws.readyState===WebSocket.OPEN))return;
+  clearTimeout(wsReconnectTimer);wsReconnectTimer=null;
+  const apiUrl=new URL(API||location.origin);
+  const proto=apiUrl.protocol==='https:'?'wss':'ws';
+  const socket=new WebSocket(`${proto}://${apiUrl.host}/ws`);
+  ws=socket;
+  socket.onopen=()=>{
+    if(ws!==socket)return;
+    clearTimeout(wsReconnectTimer);wsReconnectTimer=null;wsReconnectAttempt=0;
+    wsAlive=true;
+    document.getElementById('meStatus').textContent='Connected';
+    if(activeChatId){wsSend({type:'subscribe',chat_id:activeChatId});refreshMessages();}
+    if(wsConnectedBefore){loadChats();refreshUpdateAnnouncement();}
+    wsConnectedBefore=true;
+  };
+  socket.onmessage=ev=>{
+    if(ws!==socket)return;
+    try{handleWSEvent(JSON.parse(ev.data));}
+    catch(error){console.warn('Ignored malformed socket event',error);}
+  };
+  socket.onclose=ev=>{
+    if(ws!==socket)return;
+    wsAlive=false;ws=null;
+    document.getElementById('meStatus').textContent='Disconnected';
+    if(ev.code===4401){clearSignedInState();return;}
+    if(!TOKEN||navigator.onLine===false)return;
+    const delay=Math.min(30000,1000*2**Math.min(wsReconnectAttempt++,5))+Math.floor(Math.random()*250);
+    clearTimeout(wsReconnectTimer);
+    wsReconnectTimer=setTimeout(()=>{wsReconnectTimer=null;connectWS();},delay);
+  };
+  socket.onerror=()=>{try{socket.close();}catch(e){}};
+}
+window.addEventListener('online',()=>{
+  if(!TOKEN)return;
+  clearTimeout(wsReconnectTimer);wsReconnectTimer=null;
+  connectWS();
+});
 
 function handleWSEvent(d){
   if (d.type === 'personal_chats_changed') { if(typeof refreshPersonalChats==='function')refreshPersonalChats(d);else loadChats();return; }
@@ -220,15 +262,13 @@ function handleWSEvent(d){
       const chat = chats.find(c=>c.id===d.chat_id);
       if (chat) chat._typingPreview = true;
     }
-    renderChatList();
+    scheduleTypingListRender();
   }
   else if (d.type === 'read'){
-    loadChats();
-    if (d.chat_id === activeChatId && d.user_id !== ME.id) refreshMessages();
+    scheduleReceiptRefresh(d.chat_id===activeChatId&&d.user_id!==ME.id);
   }
   else if (d.type === 'delivery'){
-    loadChats();
-    if (activeChatId && d.chat_ids?.some(id=>conversationIds(activeChatId).includes(id))) refreshMessages();
+    scheduleReceiptRefresh(Boolean(activeChatId&&d.chat_ids?.some(id=>conversationIds(activeChatId).includes(id))));
   }
   else if (d.type === 'presence'){
     const chat = chats.find(c=> c.peer && c.peer.id===d.user_id);
@@ -245,7 +285,7 @@ setInterval(()=>{ if (wsAlive && ws && ws.readyState===1) ws.send(JSON.stringify
 let chatLoadState='idle',chatLoadPromise=null;
 async function loadChats(){
   if(chatLoadPromise)return chatLoadPromise;
-  chatLoadState='loading';renderChatList();
+  chatLoadState='loading';if(!chats.length)renderChatList();
   chatLoadPromise=(async()=>{
     try {
       const res=await fetch(`${API}/api/v2/chats`,{headers:{Authorization:"Bearer "+TOKEN}});

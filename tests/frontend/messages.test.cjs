@@ -172,3 +172,53 @@ test('clearing a chat discards its pending content and ignores a late response',
   assert.equal(c.bubbles().length,0);
   assert.equal(c.run('outgoingMessages.size'),0);
 });
+
+test('mobile navigation remains outside the disappearing chat sidebar',()=>{
+  const c=client();
+  const nav=c.document.querySelector('#app > nav.mobile-nav');
+  assert.ok(nav,'navigation should belong to the app rather than the sidebar');
+  assert.equal(nav.closest('.sidebar'),null);
+  for(const id of ['mobileChats','mobileUpdates','mobileCommunities','mobileCalls'])
+    assert.ok(nav.querySelector('#'+id),'missing tab '+id);
+  c.document.getElementById('sidebar').classList.add('hidden');
+  assert.ok(c.document.querySelector('#app > nav.mobile-nav'));
+  assert.match(readFileSync(path.join(frontend,'styles.css'),'utf8'),/\.mobile-nav\s*\{[^}]*z-index:220/);
+});
+
+test('delivery and read receipt bursts share a single refresh timer',()=>{
+  const c=client();
+  c.run("handleWSEvent({type:'read',chat_id:10,user_id:2});handleWSEvent({type:'delivery',chat_ids:[10]});handleWSEvent({type:'read',chat_id:10,user_id:3});");
+  const receipts=[...c.timers.values()].filter(x=>x.delay===220);
+  assert.equal(receipts.length,1);
+  assert.equal(c.requests.length,0,'no immediate full chat fetch for each receipt');
+});
+
+test('incoming message popups are safe and open their selected conversation',()=>{
+  const c=client();
+  const social=readFileSync(path.join(frontend,'social.js'),'utf8');
+  const start=social.indexOf('function showIncomingMessagePopup(');
+  const end=social.indexOf('async function refreshNotifications(',start);
+  assert.ok(start>=0&&end>start);
+  c.run(social.slice(start,end));
+  c.run("function openNotification(n){window.lastOpened=n.id;}");
+  c.run("showIncomingMessagePopup({id:47,title:'<script>alert(1)</script>',chat_id:20},{id:20,title:'Group chat'},'Tap to open')");
+  const popup=c.document.querySelector('.incoming-message-popup');
+  assert.ok(popup);
+  assert.equal(popup.querySelector('script'),null);
+  assert.match(popup.textContent,/Tap to open/);
+  popup.querySelector('.incoming-message-open').onclick();
+  assert.equal(c.run('window.lastOpened'),47);
+  assert.equal(c.document.querySelector('.incoming-message-popup'),null);
+});
+
+test('socket retries slow down after repeated disconnects',()=>{
+  const c=client();
+  c.run("location={origin:'https://goldchat.example'};window.created=[];class FakeWebSocket{static CONNECTING=0;static OPEN=1;constructor(url){this.url=url;this.readyState=0;window.created.push(this);}close(){this.readyState=3;}};WebSocket=FakeWebSocket;ws=null;connectWS();window.created[0].onclose({code:1006});");
+  const first=[...c.timers.values()].at(-1);
+  assert.ok(first.delay>=1000&&first.delay<1250);
+  first.fn();
+  c.run('window.created[1].onclose({code:1006})');
+  const second=[...c.timers.values()].at(-1);
+  assert.ok(second.delay>=2000&&second.delay<2250);
+  assert.equal(c.run('window.created.length'),2);
+});

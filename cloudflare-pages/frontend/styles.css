@@ -689,3 +689,18 @@ kbd {border:1px solid var(--gold-dim);border-bottom-width:3px;border-radius:5px;
 .owner-message header{display:flex;gap:12px;justify-content:space-between;align-items:flex-start;font-size:13px;}.owner-message header small{font-size:11px;color:var(--text-dim);font-weight:400;}.owner-message time{font-size:11px;color:var(--text-dim);text-align:right;}.owner-message p{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.6;font-size:14px;margin:14px 0;}.owner-message>small{display:block;color:var(--text-dim);font-size:11px;line-height:1.6;margin-top:9px;}.owner-message>.feature-btn{margin-top:12px;max-width:100%;overflow-wrap:anywhere;}
 .owner-media{margin-top:12px;}.owner-media:empty{display:none;}.owner-media img,.owner-media video{display:block;max-width:100%;max-height:420px;border-radius:12px;}.owner-media audio{width:min(100%,380px);}.owner-media a{color:var(--gold-bright);}
 @media(max-width:760px){.owner-stats{grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;}.owner-stats article{padding:14px;}.owner-stats strong{font-size:28px;}.owner-service{grid-template-columns:1fr;}.owner-search{flex-wrap:wrap;}.owner-search label{flex-basis:100%;}.owner-search select{flex:1;max-width:none;}.owner-table{min-width:660px;}.owner-message header{flex-direction:column;gap:5px;}.owner-message time{text-align:left;}.owner-list>div{align-items:flex-start;}.owner-list time{max-width:120px;font-size:11px;}.owner-action-card,.owner-review-form{padding:16px;}.owner-tabs button{padding:9px 12px;font-size:12px;}}
+
+/* Mobile tabs are global navigation, not a child of the chat list. */
+@media (max-width:760px) {
+  :root { --bottom-tab-bar: 76px; }
+  #app > .mobile-nav {
+    display:flex; position:fixed; left:0; right:0; bottom:0;
+    width:100%; height:var(--bottom-tab-bar); z-index:220;
+    padding-bottom:env(safe-area-inset-bottom);
+    box-shadow:0 -8px 24px rgba(0,0,0,.18);
+  }
+  .chat-main { height:calc(100dvh - var(--bottom-tab-bar)); }
+  .sidebar { padding-bottom:var(--bottom-tab-bar); }
+  .call-overlay { bottom:var(--bottom-tab-bar); }
+  .toast { bottom:calc(var(--bottom-tab-bar) + 10px); }
+}
