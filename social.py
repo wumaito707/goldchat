@@ -168,7 +168,10 @@ def install(app,b,hooks):
             row=call_row(call_id,user)
             if row['chat_id']!=cid:raise HTTPException(403,'Call belongs to another chat')
             if kind=='offer' and row['caller_id']!=user:raise HTTPException(403,'Only the caller can send the offer')
-            if kind in {'answer','hangup','busy','unavailable'}:update_call(call_id,user,kind)
+            if kind in {'answer','hangup','busy','unavailable'}:
+                # A timed-out incoming ring is missed, not manually declined.
+                reason='missed' if kind=='hangup' and signal.get('reason')=='missed' and row['callee_id']==user else kind
+                update_call(call_id,user,reason)
         return call_id
 
     @app.post('/api/social/session-cookie')

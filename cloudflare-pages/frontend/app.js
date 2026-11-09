@@ -131,6 +131,7 @@ async function enterApp(initialChats=null){
   document.getElementById('meStatus').className = "me-status online";
   authWrap.style.display = 'none';
   appEl.style.display = 'flex';
+  if(typeof syncMobileTabsVisibility==='function')syncMobileTabsVisibility();
   // Conversations are the first thing people expect to see.  Start their
   // request immediately instead of waiting for the optional social widgets.
   const chatsReady = initialChats === null ? loadChats() : Promise.resolve();
@@ -380,6 +381,10 @@ async function openChat(chatId){
   updateSendBtn();
   document.getElementById('emptyState').style.display = 'none';
   document.getElementById('chatView').style.display = 'flex';
+  if (window.innerWidth <= 760) {
+    document.getElementById('sidebar').classList.add('hidden');
+    if(typeof syncMobileTabsVisibility==='function')syncMobileTabsVisibility();
+  }
   const c = chats.find(x=>x.id===chatId);
   // reset unread
   c.unread = 0; c._typingPreview = false;
@@ -394,7 +399,6 @@ async function openChat(chatId){
   wsSend({type:'subscribe', chat_id: chatId});
   if (!document.hidden) markRead(chatId);
   renderChatList();
-  if (window.innerWidth <= 760) document.getElementById('sidebar').classList.add('hidden');
   document.getElementById('composerInput').focus();
 }
 
@@ -733,6 +737,7 @@ document.querySelectorAll('.chat-filter').forEach(button=>button.addEventListene
 }));
 document.getElementById('backBtn').addEventListener('click', ()=>{
   document.getElementById('sidebar').classList.remove('hidden');
+  if(typeof syncMobileTabsVisibility==='function')syncMobileTabsVisibility();
 });
 document.getElementById('logoutBtn').addEventListener('click', async ()=>{
   saveDraft();

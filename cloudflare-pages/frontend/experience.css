@@ -112,3 +112,54 @@ body.light-theme{--black-0:#eeeae1;--black-1:#faf7f0;--black-2:#f1ebdf;--black-3
     max-height:calc(100dvh - var(--bottom-tab-bar,76px));
   }
 }
+
+/* The fixed navigation belongs to the four root sections only. Secondary
+   screens reclaim the full viewport instead of leaving an empty tab gap. */
+@media (max-width:760px) {
+  body:not(.main-tabs-visible) #app > .mobile-nav { display:none!important; }
+  body:not(.main-tabs-visible) .chat-main { height:100dvh; }
+  body:not(.main-tabs-visible) .sidebar { padding-bottom:0; }
+  body:not(.main-tabs-visible) .sidebar .fab { bottom:24px; }
+  body:not(.main-tabs-visible) .call-overlay { bottom:0; }
+  body:not(.main-tabs-visible) .toast { bottom:24px; }
+  body:not(.main-tabs-visible) .workspace-page,
+  body:not(.main-tabs-visible) .immersive-status,
+  body:not(.main-tabs-visible) .page-overlay .feature-page:not(.workspace-page):not(.immersive-status) {
+    height:100dvh;
+    max-height:100dvh;
+  }
+}
+
+/* Calls: keep the person's name readable on narrow phones. */
+.call-history-card {
+  display:grid;
+  grid-template-columns:24px minmax(0,1fr);
+  align-items:start;
+  gap:10px 12px;
+}
+.call-history-card > div:not(.call-history-actions) { min-width:0; overflow-wrap:anywhere; }
+.call-history-card .call-history-actions {
+  grid-column:1/-1;
+  display:flex;
+  flex-wrap:wrap;
+  gap:8px;
+  min-width:0;
+}
+.call-history-actions .feature-btn {
+  flex:1 1 120px;
+  min-width:0;
+  margin:0;
+  text-align:center;
+}
+.call-overlay { overflow-y:auto; }
+.call-overlay .call-type { color:var(--gold-bright); text-transform:uppercase; letter-spacing:.1em; font-size:12px; }
+.call-overlay.voice-call #localVideo,
+.call-overlay.voice-call #remoteVideo {
+  position:absolute;
+  width:1px;
+  height:1px;
+  opacity:0;
+  pointer-events:none;
+}
+.call-overlay.voice-call .call-type { font-size:16px; }
+.call-controls { flex-wrap:wrap; justify-content:center; }

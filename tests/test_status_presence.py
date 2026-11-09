@@ -76,6 +76,17 @@ class StatusPresenceTest(unittest.TestCase):
         self.assertLess(response.status_code, 400, response.text)
         return response.json()
 
+    def test_incoming_call_timeout_is_missed_not_declined(self):
+        cid=self.server.get_or_create_direct_chat(4,5)
+        call_id=self.call(4,'POST','/api/social/calls',json={'chat_id':cid,'video':True})['id']
+        self.server.SOCIAL_HOOKS['record_signal'](cid,5,{'kind':'hangup','call_id':call_id,'reason':'missed'})
+        call=next(row for row in self.call(5,'GET','/api/social/calls') if row['id']==call_id)
+        self.assertEqual(call['status'],'missed')
+        self.assertIsNotNone(call['ended_at'])
+        with self.db() as conn:
+            count=conn.execute("SELECT COUNT(*) FROM notifications WHERE user_id=5 AND kind='call' AND chat_id=?",(cid,)).fetchone()[0]
+        self.assertGreaterEqual(count,1)
+
     @contextmanager
     def owner(self):
         with self.db() as conn:

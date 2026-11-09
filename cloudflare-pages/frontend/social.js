@@ -270,8 +270,9 @@ async function showCallHistory(){
     matches.forEach(c=>{
       const card=document.createElement('article');card.className='feature-card call-history-card';
       card.innerHTML=`<span class="call-direction" aria-hidden="true">${c.status==='missed'?'↙':c.direction==='outgoing'?'↗':'↙'}</span><div><strong>${escapeHtml(c.peer?.display_name||'Unknown contact')}</strong><p>${escapeHtml(c.direction)} ${c.video?'video':'voice'} · ${escapeHtml(c.status)}${c.duration?' · '+Math.floor(c.duration/60)+'m '+c.duration%60+'s':''}</p><small>${new Date(c.created_at*1000).toLocaleString()}</small></div>`;
-      const open=document.createElement('button');open.className='feature-btn';open.textContent='Open chat';open.onclick=async()=>{closePanel();await loadChats();await openChat(c.chat_id);};card.appendChild(open);
-      const again=document.createElement('button');again.className='feature-btn';again.textContent=c.video?'Video call':'Voice call';again.onclick=async()=>{closePanel();await loadChats();await openChat(c.chat_id);await startCall(!!c.video);};card.appendChild(again);list.appendChild(card);
+      const actions=document.createElement('div');actions.className='call-history-actions';
+      const open=document.createElement('button');open.className='feature-btn';open.textContent='Open chat';open.onclick=async()=>{closePanel();await loadChats();await openChat(c.chat_id);};actions.appendChild(open);
+      const again=document.createElement('button');again.className='feature-btn';again.textContent=c.video?'Video call':'Voice call';again.onclick=async()=>{closePanel();await loadChats();await openChat(c.chat_id);await startCall(!!c.video);};actions.appendChild(again);card.appendChild(actions);list.appendChild(card);
     });
   }
   document.getElementById('callSearch').oninput=renderCalls;
@@ -298,6 +299,7 @@ async function showLinkDeviceQR(){panel('Link this device',field('newDeviceLabel
   async function poll(){if(!active)return;try{const response=await fetch('/api/social/device-links/'+data.id+'/claim',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({poll_secret:data.poll_secret})}),result=await response.json();if(!response.ok)throw new Error(result.detail||'Link failed');if(!result.pending){claimed=true;TOKEN=result.token;ME=result.user;localStorage.setItem('gc_token',TOKEN);localStorage.setItem('gc_me',JSON.stringify(ME));closePanel();await enterApp();toast('Device linked');return;}timer=setTimeout(poll,2000);}catch(e){if(active&&document.getElementById('linkProgress'))document.getElementById('linkProgress').textContent=e.message;}}poll();
 });}
 const linkLogin=document.createElement('button');linkLogin.className='feature-btn link-login';linkLogin.textContent='Link device with QR';linkLogin.type='button';linkLogin.onclick=showLinkDeviceQR;document.getElementById('authForm').after(linkLogin);
-setInterval(()=>{const now=Date.now()/1000;document.querySelectorAll('.status-card[data-expires]').forEach(el=>{if(Number(el.dataset.expires)<=now)el.remove();});let removed=false;document.querySelectorAll('.msg[data-expires]').forEach(el=>{if(Number(el.dataset.expires)<=now){messageCache.delete(Number(el.dataset.id));el.remove();removed=true;}});if(removed&&TOKEN)loadChats();if(TOKEN&&ME)refreshNotifications(true);},15000);
+let lastNotificationFallback=0;
+setInterval(()=>{const now=Date.now()/1000;document.querySelectorAll('.status-card[data-expires]').forEach(el=>{if(Number(el.dataset.expires)<=now)el.remove();});let removed=false;document.querySelectorAll('.msg[data-expires]').forEach(el=>{if(Number(el.dataset.expires)<=now){messageCache.delete(Number(el.dataset.id));el.remove();removed=true;}});if(removed&&TOKEN)loadChats();if(TOKEN&&ME&&!document.hidden&&(Date.now()-lastNotificationFallback>=60000||!wsAlive)){lastNotificationFallback=Date.now();refreshNotifications(true);}},15000);
 
 async function syncOwnProfile(){if(!TOKEN)return;try{ME=await request('/api/profile');paintAvatar(document.getElementById('meAvatar'),ME);document.getElementById('meName').textContent=ME.display_name;}catch(e){console.error(e);}}

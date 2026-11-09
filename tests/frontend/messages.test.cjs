@@ -185,6 +185,57 @@ test('mobile navigation remains outside the disappearing chat sidebar',()=>{
   assert.match(readFileSync(path.join(frontend,'styles.css'),'utf8'),/\.mobile-nav\s*\{[^}]*z-index:220/);
 });
 
+test('bottom tabs appear on the four root pages and disappear on detail screens',()=>{
+  const c=client(),visible=()=>c.document.body.classList.contains('main-tabs-visible');
+  c.run('syncMobileTabsVisibility()');assert.equal(visible(),true,'chat list');
+  c.run(`document.getElementById('sidebar').classList.add('hidden');syncMobileTabsVisibility()`);
+  assert.equal(visible(),false,'individual chat');
+  for(const page of ['Updates','Communities','Calls']){
+    c.run(`panel('${page}','','page')`);assert.equal(visible(),true,page);
+  }
+  for(const detail of ['Status viewer','Add status','Settings','Create a group']){
+    c.run(`panel('${detail}','','page')`);assert.equal(visible(),false,detail);
+  }
+  c.run('openChatsTab()');assert.equal(visible(),true,'back to chats');
+  assert.match(readFileSync(path.join(frontend,'experience.css'),'utf8'),/body:not\(\.main-tabs-visible\) #app > \.mobile-nav/);
+});
+
+test('voice and video calls use STUN, show the right mode and can be ended',async()=>{
+  for(const video of [false,true]){
+    const c=client();
+    c.run(`wsAlive=true;activeChatId=20;chats=[{id:20,type:'direct',peer:{id:2,display_name:'Peer'}}];
+      navigator.mediaDevices={getUserMedia:async opts=>{window.mediaOptions=opts;return {getTracks:()=>[{stop(){},enabled:true}],getAudioTracks:()=>[{enabled:true}]};}};
+      window.RTCPeerConnection=RTCPeerConnection=class {
+        constructor(config){window.iceConfig=config;this.connectionState='new';}
+        addTrack(){};async createOffer(){return {sdp:'offer-sdp'};};async setLocalDescription(){};close(){};
+      };`);
+    const pending=c.run(`startCall(${video})`);
+    assert.equal(c.requests.length,1);
+    c.requests[0].resolve({id:'call-1'});await pending;
+    assert.equal(c.run('window.mediaOptions.video'),video);
+    assert.equal(c.run('window.mediaOptions.audio'),true);
+    assert.match(c.run('window.iceConfig.iceServers[0].urls[0]'),/^stun:/);
+    assert.equal(c.document.getElementById('callOverlay').classList.contains('voice-call'),!video);
+    assert.equal(c.document.body.classList.contains('main-tabs-visible'),false,'in-call is a detail screen');
+    assert.equal(c.socket.at(-1).signal.kind,'offer');
+    c.run('endCall(true)');
+    assert.equal(c.document.getElementById('callOverlay'),null);
+    assert.equal(c.socket.at(-1).signal.kind,'hangup');
+  }
+});
+
+test('an unanswered incoming call is recorded as missed',async()=>{
+  const c=client();
+  c.run(`activeChatId=20;chats=[{id:20,type:'direct',peer:{display_name:'Peer'}}];`);
+  await c.run(`handleCallSignal({chat_id:20,signal:{kind:'offer',call_id:'call-2',sdp:'offer',video:false}})`);
+  assert.ok(c.document.getElementById('acceptCall'));
+  const timeout=[...c.timers.values()].find(timer=>timer.delay===45000);
+  assert.ok(timeout);
+  timeout.fn();
+  assert.equal(c.socket.at(-1).signal.reason,'missed');
+  assert.equal(c.requests.at(-1).body.action,'missed');
+});
+
 test('delivery and read receipt bursts share a single refresh timer',()=>{
   const c=client();
   c.run("handleWSEvent({type:'read',chat_id:10,user_id:2});handleWSEvent({type:'delivery',chat_ids:[10]});handleWSEvent({type:'read',chat_id:10,user_id:3});");

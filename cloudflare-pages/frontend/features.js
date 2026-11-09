@@ -137,9 +137,18 @@ function selectMainSection(section) {
   document.querySelectorAll('.desktop-nav-item,.mobile-nav-item').forEach(button=>{button.classList.remove('active');button.removeAttribute('aria-current');});
   (names[section]||names.Chats).forEach(id=>{const button=document.getElementById(id);button?.classList.add('active');button?.setAttribute('aria-current','page');});
 }
+// Main tabs stay visible only on the four destinations, never in a chat,
+// status editor/viewer, settings dialog, or active voice/video call.
+function syncMobileTabsVisibility() {
+  const currentPanel=document.querySelector('#modalRoot .feature-panel');
+  const mainPanel=['Updates','Communities','Calls'].includes(currentPanel?.getAttribute('aria-label'));
+  const chatsHome=!currentPanel && !document.getElementById('sidebar').classList.contains('hidden');
+  document.body.classList.toggle('main-tabs-visible',!document.getElementById('callOverlay') && (mainPanel || chatsHome));
+}
 let panelReturnFocus=null;
 function closePanel() {
   document.getElementById('modalRoot').innerHTML='';selectMainSection('Chats');
+  syncMobileTabsVisibility();
   if(panelReturnFocus?.isConnected)panelReturnFocus.focus();
   panelReturnFocus=null;
 }
@@ -157,6 +166,7 @@ function panel(title, html, layout='dialog') {
     else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first?.focus();}
   };
   root.querySelector('input,textarea,button')?.focus();
+  syncMobileTabsVisibility();
   return root;
 }
 function field(id,label,value='',type='text') {
@@ -202,7 +212,7 @@ document.getElementById('archiveToggle').onclick=()=>{showArchived=!showArchived
 document.getElementById('createGroup').onclick=()=>showGroup('group');
 document.getElementById('emptyStartChat').onclick=openNewChatModal;
 document.getElementById('chatTools').onclick=showChatTools;
-function openChatsTab(){closePanel();chatListFilter='all';renderChatList();document.getElementById('sidebar').classList.remove('hidden');}
+function openChatsTab(){closePanel();chatListFilter='all';renderChatList();document.getElementById('sidebar').classList.remove('hidden');syncMobileTabsVisibility();}
 function openCommunitiesTab(){showGroup('channel');selectMainSection('Communities');}
 function openMoreTab(){document.getElementById('featuresMenu')?.click();}
 document.getElementById('mobileChats')?.addEventListener('click',openChatsTab);
@@ -526,12 +536,15 @@ const voiceCallBtn=document.getElementById('voiceCallBtn');
 voiceCallBtn?.classList.add('call-header-btn');
 voiceCallBtn.onclick=()=>startCall(false);
 videoBtn.onclick=()=>startCall(true);
+const callIceServers=[{urls:['stun:stun.l.google.com:19302','stun:stun1.l.google.com:19302']}];
+let callStartPending=false;
 function signalCall(signal) {if(call)wsSend({type:'call_signal',chat_id:call.cid,signal:{...signal,call_id:call.id}});}
 function callScreen(title,incoming=false) {
   document.getElementById('callOverlay')?.remove();
-  const overlay=document.createElement('section');overlay.id='callOverlay';overlay.className='call-overlay';overlay.setAttribute('role','dialog');overlay.setAttribute('aria-label','Call');
-  overlay.innerHTML=`<h2 id="callStatus">${escapeHtml(title)}</h2><p class="helper">Local-network call · Internet relay is not configured</p><video id="remoteVideo" autoplay playsinline></video><video id="localVideo" autoplay playsinline muted></video><div class="call-controls">${incoming?action('acceptCall','Accept')+action('declineCall','Decline'):action('muteCall','Mute microphone')+action('endCall','End call')}</div>`;
+  const overlay=document.createElement('section');overlay.id='callOverlay';overlay.className='call-overlay';overlay.classList.toggle('voice-call',!call?.video);overlay.setAttribute('role','dialog');overlay.setAttribute('aria-label',call?.video?'Video call':'Voice call');
+  overlay.innerHTML=`<span class="call-type">${call?.video?'Video call':'Voice call'}</span><h2 id="callStatus" role="status">${escapeHtml(title)}</h2><p class="helper">Direct internet call · Some networks may require a relay</p><video id="remoteVideo" autoplay playsinline></video><video id="localVideo" autoplay playsinline muted></video><div class="call-controls">${incoming?action('acceptCall','Accept')+action('declineCall','Decline'):action('muteCall','Mute microphone')+action('endCall','End call')}</div>`;
   document.body.appendChild(overlay);
+  syncMobileTabsVisibility();
   if(incoming){document.getElementById('acceptCall').onclick=acceptCall;document.getElementById('declineCall').onclick=()=>endCall(true);}
   else {
     document.getElementById('endCall').onclick=()=>endCall(true);
@@ -544,39 +557,48 @@ async function makePeer(video) {
   const stream=await navigator.mediaDevices.getUserMedia({audio:true,video});
   if(call!==state){stream.getTracks().forEach(t=>t.stop());throw new Error('Call ended');}
   state.stream=stream;
-  state.pc=new RTCPeerConnection({iceServers:[]});
+  // STUN lets two peers discover routes across many home/mobile networks.
+  // Restrictive NATs still need TURN, which must be provisioned separately.
+  state.pc=new RTCPeerConnection({iceServers:callIceServers});
   document.getElementById('localVideo').srcObject=stream;
   stream.getTracks().forEach(t=>state.pc.addTrack(t,stream));
-  state.pc.ontrack=e=>{if(call===state)document.getElementById('remoteVideo').srcObject=e.streams[0];};
+  state.pc.ontrack=e=>{if(call===state)document.getElementById('remoteVideo').srcObject=e.streams[0]||new MediaStream([e.track]);};
   state.pc.onicecandidate=e=>{if(e.candidate && call===state)signalCall({kind:'ice',candidate:e.candidate.toJSON()});};
   state.pc.onconnectionstatechange=()=>{
     if(call!==state)return;
-    if(state.pc.connectionState==='connected' && !state.loggedConnected){state.loggedConnected=true;request('/api/social/calls/'+state.id,'POST',{action:'connected'}).catch(()=>{});}
-    const status=document.getElementById('callStatus');if(status)status.textContent=state.pc.connectionState==='connected'?'Connected':state.pc.connectionState;
-    if(['failed','closed'].includes(state.pc.connectionState)){toast('Call ended. Internet calls may need a TURN relay.');endCall(true);}
+    const connection=state.pc.connectionState;
+    if(connection==='connected'){
+      clearTimeout(state.timeout);clearTimeout(state.disconnectedTimer);state.disconnectedTimer=null;
+      if(!state.loggedConnected){state.loggedConnected=true;request('/api/social/calls/'+state.id,'POST',{action:'connected'}).catch(()=>{});}
+    }
+    const status=document.getElementById('callStatus');if(status)status.textContent=connection==='connected'?'Connected':connection==='disconnected'?'Reconnecting…':connection==='connecting'?'Connecting…':connection;
+    if(connection==='disconnected' && !state.disconnectedTimer){state.disconnectedTimer=setTimeout(()=>{if(call===state && state.pc.connectionState==='disconnected'){toast('Call connection lost.');endCall(true);}},12000);}
+    if(connection==='failed'){toast('Could not connect. This network may need a TURN relay.');endCall(true);}
   };
 }
 async function startCall(video) {
   const c=chats.find(c=>c.id===activeChatId);
   if(!c || c.type!=='direct')return toast('Open a direct chat to call.');
-  if(call)return toast('Finish the current call first.');
+  if(call || callStartPending)return toast('Finish the current call first.');
   if(!wsAlive)return toast('Reconnect before starting a call.');
+  callStartPending=true;
   try {
     const logged=await request('/api/social/calls','POST',{chat_id:c.id,video});call={cid:c.id,id:logged.id,video};pendingICE=[];callScreen('Calling '+c.peer.display_name+'…');
     await makePeer(video);const offer=await call.pc.createOffer();await call.pc.setLocalDescription(offer);
     signalCall({kind:'offer',sdp:offer.sdp,video});
     call.timeout=setTimeout(()=>{toast('No answer.');endCall(true);},45000);
   } catch(e){toast(e.message);endCall(true);}
+  finally {callStartPending=false;}
 }
 async function acceptCall() {
   if(!call?.offer)return;
   try {
     const offer=call.offer,video=call.video;
+    clearTimeout(call.timeout);
     callScreen('Connecting…');await makePeer(video);
     await call.pc.setRemoteDescription({type:'offer',sdp:offer});
     for(const candidate of pendingICE)await call.pc.addIceCandidate(candidate);pendingICE=[];
     const answer=await call.pc.createAnswer();await call.pc.setLocalDescription(answer);signalCall({kind:'answer',sdp:answer.sdp});
-    clearTimeout(call.timeout);
   } catch(e){toast(e.message);endCall(true);}
 }
 async function handleCallSignal(d) {
@@ -586,19 +608,20 @@ async function handleCallSignal(d) {
       if(call){wsSend({type:'call_signal',chat_id:d.chat_id,signal:{kind:'busy'}});return;}
       call={cid:d.chat_id,id:s.call_id,offer:s.sdp,video:!!s.video};pendingICE=[];
       const c=chats.find(c=>c.id===d.chat_id);callScreen('Incoming '+(s.video?'video':'voice')+' call from '+(c?.peer?.display_name||'a contact'),true);
-      call.timeout=setTimeout(()=>endCall(true),45000);return;
+      call.timeout=setTimeout(()=>{toast('Missed call.');endCall(true,'missed');},45000);return;
     }
     if(!call || call.cid!==d.chat_id)return;
-    if(s.kind==='answer') {await call.pc.setRemoteDescription({type:'answer',sdp:s.sdp});for(const candidate of pendingICE)await call.pc.addIceCandidate(candidate);pendingICE=[];clearTimeout(call.timeout);}
+    if(s.kind==='answer') {await call.pc.setRemoteDescription({type:'answer',sdp:s.sdp});for(const candidate of pendingICE)await call.pc.addIceCandidate(candidate);pendingICE=[];}
     else if(s.kind==='ice') {if(call.pc?.remoteDescription)await call.pc.addIceCandidate(s.candidate);else pendingICE.push(s.candidate);}
     else if(['hangup','busy','unavailable'].includes(s.kind)){toast(s.kind==='busy'?'Contact is busy':s.kind==='unavailable'?'Contact is offline':'Call ended');endCall(false);}
   } catch(e){toast('Call error: '+e.message);endCall(true);}
 }
-function endCall(notify=false) {
-  if(notify)signalCall({kind:'hangup'});
-  if(call?.id && TOKEN)request('/api/social/calls/'+call.id,'POST',{action:'hangup'}).then(()=>refreshNotifications(true)).catch(()=>{});
-  if(call){clearTimeout(call.timeout);call.pc?.close();call.stream?.getTracks().forEach(t=>t.stop());}
+function endCall(notify=false,reason='hangup') {
+  if(notify)signalCall({kind:'hangup',reason});
+  if(call?.id && TOKEN)request('/api/social/calls/'+call.id,'POST',{action:reason==='missed'?'missed':'hangup'}).then(()=>refreshNotifications(true)).catch(()=>{});
+  if(call){clearTimeout(call.timeout);clearTimeout(call.disconnectedTimer);call.pc?.close();call.stream?.getTracks().forEach(t=>t.stop());}
   call=null;pendingICE=[];document.getElementById('callOverlay')?.remove();
+  syncMobileTabsVisibility();
 }
 window.addEventListener('beforeunload',()=>{saveDraft();endCall(true);});
 document.getElementById('logoutBtn').addEventListener('click',()=>endCall(true));
