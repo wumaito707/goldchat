@@ -15,3 +15,16 @@ The cloud database starts empty. Existing local accounts and uploads are not mig
 Free plans have quotas and may sleep or pause. WebSocket connections disconnect when the Render process sleeps or restarts. Calls still need separate TURN configuration for reliable connections across networks. Expired status records are hidden, but old stored media needs retention cleanup to control storage usage.
 
 Keep all credentials in provider dashboards, never in chat or GitHub. Replace credentials previously shared in chat.
+
+## Cloudflare Realtime TURN for voice and video calls
+
+GOLDCHAT can make direct WebRTC calls using STUN without a TURN account, but some mobile networks, firewalls, or symmetric NATs require a relay. The server now supports Cloudflare Realtime TURN as a fallback for **both** voice and video calls.
+
+1. In the Cloudflare dashboard, go to **Realtime → TURN**, create a TURN key, and copy its **TURN Key ID** and **TURN API Token**. These are permanent server-side secrets. See [Cloudflare's credential guide](https://developers.cloudflare.com/realtime/turn/generate-credentials/).
+2. In **Render → GOLDCHAT service → Environment**, add `GOLDCHAT_TURN_KEY_ID` and `GOLDCHAT_TURN_API_TOKEN` with those values. Do this for each separately deployed backend used by the website. The Cloudflare Pages Worker currently proxies `/api` to the Frankfurt Render service.
+3. Save the environment settings and let Render redeploy/restart. **Do not** commit the credentials, paste them into chat, or expose them as Cloudflare Pages frontend variables.
+4. The authenticated `GET /api/calls/ice-config` endpoint asks Cloudflare for **temporary credentials** (24-hour expiry) on the backend. It responds with `Cache-Control: private, no-store`. The browser automatically uses them in `RTCPeerConnection`. A five-minute in-memory browser cache avoids repeated requests during closely spaced calls.
+5. Test with two different accounts and devices: voice and video calls on Wi-Fi ↔ mobile data, accept, decline, mute, and hang up. If TURN is not configured or temporarily unavailable, calls fall back to direct STUN; restrictive networks may still fail.
+6. Set a Cloudflare Realtime usage/billing alert and review costs before inviting many users. TURN is billed by outbound data after any applicable allowance; consult [current pricing](https://developers.cloudflare.com/realtime/sfu/platform/pricing/).
+
+To confirm setup without seeing any secrets, sign in to GOLDCHAT and open a call; the call screen should say **Encrypted relay ready if direct connection fails**. Unauthenticated requests to the ICE endpoint are rejected.

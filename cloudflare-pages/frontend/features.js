@@ -528,7 +528,7 @@ document.addEventListener('keydown',e=>{if(e.key==='Escape')closePanel();if((e.c
 document.addEventListener('visibilitychange',()=>{if(!document.hidden && activeChatId)refreshMessages();});
 applySettings();
 
-/* Voice/video: peer-to-peer on localhost/HTTPS; no external relay configured. */
+/* Voice/video: direct peer-to-peer first, with optional Cloudflare TURN relay. */
 let call=null;
 let pendingICE=[];
 const videoBtn=document.getElementById('videoCallBtn');
@@ -537,12 +537,26 @@ voiceCallBtn?.classList.add('call-header-btn');
 voiceCallBtn.onclick=()=>startCall(false);
 videoBtn.onclick=()=>startCall(true);
 const callIceServers=[{urls:['stun:stun.l.google.com:19302','stun:stun1.l.google.com:19302']}];
+let cachedTurnConfig=null;
+async function getCallIceConfiguration() {
+  if(cachedTurnConfig?.userId===ME?.id && cachedTurnConfig.expires>Date.now())return cachedTurnConfig.value;
+  try {
+    const data=await request('/api/calls/ice-config');
+    if(!Array.isArray(data.iceServers)||!data.iceServers.length)throw new Error('No ICE servers returned');
+    const value={iceServers:data.iceServers,relayConfigured:data.relayConfigured===true};
+    if(value.relayConfigured)cachedTurnConfig={userId:ME?.id,expires:Date.now()+5*60*1000,value};
+    return value;
+  }catch(error){
+    console.warn('TURN relay unavailable; trying direct connection:',error.message);
+    return {iceServers:callIceServers,relayConfigured:false,relayUnavailable:true};
+  }
+}
 let callStartPending=false;
 function signalCall(signal) {if(call)wsSend({type:'call_signal',chat_id:call.cid,signal:{...signal,call_id:call.id}});}
 function callScreen(title,incoming=false) {
   document.getElementById('callOverlay')?.remove();
   const overlay=document.createElement('section');overlay.id='callOverlay';overlay.className='call-overlay';overlay.classList.toggle('voice-call',!call?.video);overlay.setAttribute('role','dialog');overlay.setAttribute('aria-label',call?.video?'Video call':'Voice call');
-  overlay.innerHTML=`<span class="call-type">${call?.video?'Video call':'Voice call'}</span><h2 id="callStatus" role="status">${escapeHtml(title)}</h2><p class="helper">Direct internet call · Some networks may require a relay</p><video id="remoteVideo" autoplay playsinline></video><video id="localVideo" autoplay playsinline muted></video><div class="call-controls">${incoming?action('acceptCall','Accept')+action('declineCall','Decline'):action('muteCall','Mute microphone')+action('endCall','End call')}</div>`;
+  overlay.innerHTML=`<span class="call-type">${call?.video?'Video call':'Voice call'}</span><h2 id="callStatus" role="status">${escapeHtml(title)}</h2><p class="helper" id="callRelayStatus">Checking call connection…</p><video id="remoteVideo" autoplay playsinline></video><video id="localVideo" autoplay playsinline muted></video><div class="call-controls">${incoming?action('acceptCall','Accept')+action('declineCall','Decline'):action('muteCall','Mute microphone')+action('endCall','End call')}</div>`;
   document.body.appendChild(overlay);
   syncMobileTabsVisibility();
   if(incoming){document.getElementById('acceptCall').onclick=acceptCall;document.getElementById('declineCall').onclick=()=>endCall(true);}
@@ -554,12 +568,13 @@ function callScreen(title,incoming=false) {
 async function makePeer(video) {
   if(!navigator.mediaDevices?.getUserMedia || !window.RTCPeerConnection)throw new Error('Calls need a supported browser on localhost or HTTPS.');
   const state=call;
-  const stream=await navigator.mediaDevices.getUserMedia({audio:true,video});
+  // Obtain a short-lived relay credential while the permission prompt is open.
+  const [stream,iceConfig]=await Promise.all([navigator.mediaDevices.getUserMedia({audio:true,video}),getCallIceConfiguration()]);
   if(call!==state){stream.getTracks().forEach(t=>t.stop());throw new Error('Call ended');}
   state.stream=stream;
-  // STUN lets two peers discover routes across many home/mobile networks.
-  // Restrictive NATs still need TURN, which must be provisioned separately.
-  state.pc=new RTCPeerConnection({iceServers:callIceServers});
+  state.pc=new RTCPeerConnection({iceServers:iceConfig.iceServers});
+  const relayInfo=document.getElementById('callRelayStatus');
+  if(relayInfo)relayInfo.textContent=iceConfig.relayConfigured?'Encrypted relay ready if direct connection fails':iceConfig.relayUnavailable?'Relay temporarily unavailable; trying direct connection':'Direct connection · TURN relay not configured';
   document.getElementById('localVideo').srcObject=stream;
   stream.getTracks().forEach(t=>state.pc.addTrack(t,stream));
   state.pc.ontrack=e=>{if(call===state)document.getElementById('remoteVideo').srcObject=e.streams[0]||new MediaStream([e.track]);};

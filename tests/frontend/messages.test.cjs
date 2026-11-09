@@ -200,7 +200,7 @@ test('bottom tabs appear on the four root pages and disappear on detail screens'
   assert.match(readFileSync(path.join(frontend,'experience.css'),'utf8'),/body:not\(\.main-tabs-visible\) #app > \.mobile-nav/);
 });
 
-test('voice and video calls use STUN, show the right mode and can be ended',async()=>{
+test('voice and video calls use temporary relay credentials and can be ended',async()=>{
   for(const video of [false,true]){
     const c=client();
     c.run(`wsAlive=true;activeChatId=20;chats=[{id:20,type:'direct',peer:{id:2,display_name:'Peer'}}];
@@ -211,10 +211,16 @@ test('voice and video calls use STUN, show the right mode and can be ended',asyn
       };`);
     const pending=c.run(`startCall(${video})`);
     assert.equal(c.requests.length,1);
-    c.requests[0].resolve({id:'call-1'});await pending;
+    c.requests[0].resolve({id:'call-1'});
+    for(let i=0;i<15&&c.requests.length<2;i++)await new Promise(setImmediate);
+    assert.equal(c.requests[1].url,'/api/calls/ice-config');
+    c.requests[1].resolve({iceServers:[{urls:['stun:stun.cloudflare.com:3478']},{urls:['turn:turn.cloudflare.com:3478?transport=udp'],username:'short-lived-user',credential:'temporary-credential'}],relayConfigured:true});
+    await pending;
     assert.equal(c.run('window.mediaOptions.video'),video);
     assert.equal(c.run('window.mediaOptions.audio'),true);
     assert.match(c.run('window.iceConfig.iceServers[0].urls[0]'),/^stun:/);
+    assert.match(c.run('window.iceConfig.iceServers[1].urls[0]'),/^turn:/);
+    assert.match(c.document.getElementById('callRelayStatus').textContent,/relay ready/);
     assert.equal(c.document.getElementById('callOverlay').classList.contains('voice-call'),!video);
     assert.equal(c.document.body.classList.contains('main-tabs-visible'),false,'in-call is a detail screen');
     assert.equal(c.socket.at(-1).signal.kind,'offer');
@@ -222,6 +228,15 @@ test('voice and video calls use STUN, show the right mode and can be ended',asyn
     assert.equal(c.document.getElementById('callOverlay'),null);
     assert.equal(c.socket.at(-1).signal.kind,'hangup');
   }
+});
+
+test('call setup falls back to STUN if the TURN endpoint is unavailable',async()=>{
+  const c=client(),fetching=c.run('getCallIceConfiguration()');
+  c.requests[0].reject(new Error('Relay unavailable'));
+  const fallback=await fetching;
+  assert.equal(fallback.relayConfigured,false);
+  assert.equal(fallback.relayUnavailable,true);
+  assert.match(fallback.iceServers[0].urls[0],/^stun:/);
 });
 
 test('an unanswered incoming call is recorded as missed',async()=>{

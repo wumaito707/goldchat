@@ -1,15 +1,59 @@
 import cloud_media
 """Media statuses, profile pictures, notifications, QR linking and chat expiry."""
-import base64,binascii,hashlib,io,json,secrets,time
+import base64,binascii,hashlib,io,json,os,secrets,time
 from contextlib import contextmanager
 from pathlib import Path
 from datetime import datetime,timezone
 from urllib.parse import urlencode
+from urllib.request import Request as URLRequest, urlopen
 from fastapi import HTTPException,Query,Request,Depends
 from fastapi.responses import FileResponse,Response
 from pydantic import BaseModel,Field
 
 TIMERS={0,86400,604800,7776000}
+DIRECT_CALL_ICE=[{'urls':['stun:stun.l.google.com:19302','stun:stun1.l.google.com:19302']}]
+
+
+def call_ice_configuration():
+    """Return temporary Cloudflare TURN credentials, never the long-term key."""
+    key_id=os.environ.get('GOLDCHAT_TURN_KEY_ID','').strip()
+    api_token=os.environ.get('GOLDCHAT_TURN_API_TOKEN','').strip()
+    if not key_id and not api_token:
+        return {'iceServers':DIRECT_CALL_ICE,'relayConfigured':False}
+    if not key_id or not api_token:
+        raise HTTPException(503,'TURN relay configuration is incomplete')
+
+    # The permanent API token is used exclusively by the backend. The browser
+    # receives only credentials that Cloudflare automatically expires.
+    endpoint='https://rtc.live.cloudflare.com/v1/turn/keys/'+key_id+'/credentials/generate-ice-servers'
+    body=json.dumps({'ttl':86400}).encode('utf-8')
+    request=URLRequest(endpoint,data=body,headers={
+        'Authorization':'Bearer '+api_token,'Content-Type':'application/json'
+    },method='POST')
+    try:
+        with urlopen(request,timeout=4) as response:
+            payload=json.load(response)
+        servers=payload.get('iceServers')
+        if not isinstance(servers,list) or not servers:
+            raise ValueError('TURN server list missing')
+        valid=[]
+        for server in servers[:8]:
+            if not isinstance(server,dict):raise ValueError('Invalid TURN server')
+            urls=server.get('urls')
+            urls=[urls] if isinstance(urls,str) else urls
+            if not isinstance(urls,list) or not urls or any(not isinstance(url,str) or not url.startswith(('stun:','turn:','turns:')) for url in urls):
+                raise ValueError('Invalid TURN URLs')
+            entry={'urls':urls}
+            if any(url.startswith(('turn:','turns:')) for url in urls):
+                if not isinstance(server.get('username'),str) or not isinstance(server.get('credential'),str):
+                    raise ValueError('TURN credentials missing')
+                entry.update(username=server['username'],credential=server['credential'])
+            valid.append(entry)
+        if not any(any(url.startswith(('turn:','turns:')) for url in entry['urls']) for entry in valid):
+            raise ValueError('TURN relay missing')
+        return {'iceServers':valid,'relayConfigured':True}
+    except (OSError,ValueError,TypeError,KeyError):
+        raise HTTPException(503,'TURN relay temporarily unavailable') from None
 
 def init_schema(conn):
     additions=[('users','avatar_media_id','INTEGER'),('users','last_seen_at','TEXT'),('messages','expires_at','REAL'),('attachments','expires_at','REAL'),('chats','disappearing_seconds','INTEGER NOT NULL DEFAULT 0'),('statuses','media_id','INTEGER'),('statuses','background',"TEXT NOT NULL DEFAULT '#82c9a9'"),('statuses','font','INTEGER NOT NULL DEFAULT 0'),('statuses','audience','TEXT'),('sessions','label',"TEXT NOT NULL DEFAULT 'Browser'"),('sessions','created_at','REAL NOT NULL DEFAULT 0')]
@@ -432,6 +476,12 @@ def install(app,b,hooks):
         link_valid(link_id,body.poll_secret,'poll_hash')
         with db() as conn:conn.execute('DELETE FROM device_links WHERE id=?',(link_id,))
         return {'ok':True}
+
+    @app.get('/api/calls/ice-config')
+    def ice_config(response:Response,token:str=Depends(b['session_token'])):
+        uid(token)
+        response.headers['Cache-Control']='private, no-store'
+        return call_ice_configuration()
 
     @app.post('/api/social/calls')
     def new_call(body:CallCreate,token:str=Depends(b["session_token"])):

@@ -2,6 +2,7 @@
 import os
 import gc
 import json
+from io import BytesIO
 import sqlite3
 import tempfile
 import time
@@ -86,6 +87,28 @@ class StatusPresenceTest(unittest.TestCase):
         with self.db() as conn:
             count=conn.execute("SELECT COUNT(*) FROM notifications WHERE user_id=5 AND kind='call' AND chat_id=?",(cid,)).fetchone()[0]
         self.assertGreaterEqual(count,1)
+
+    def test_turn_credentials_are_short_lived_and_server_secret_stays_private(self):
+        self.assertEqual(self.client.get('/api/calls/ice-config').status_code,401)
+        with patch.dict(os.environ,{'GOLDCHAT_TURN_KEY_ID':'','GOLDCHAT_TURN_API_TOKEN':''}):
+            response=self.client.get('/api/calls/ice-config',headers={'Authorization':'Bearer '+self.tokens[1]})
+        self.assertEqual(response.status_code,200)
+        self.assertFalse(response.json()['relayConfigured'])
+        self.assertEqual(response.headers['cache-control'],'private, no-store')
+
+        temporary={'iceServers':[{'urls':['stun:stun.cloudflare.com:3478']},{'urls':['turn:turn.cloudflare.com:3478?transport=udp'],'username':'short-lived-user','credential':'short-lived-credential'}]}
+        with patch.dict(os.environ,{'GOLDCHAT_TURN_KEY_ID':'sample-key-id','GOLDCHAT_TURN_API_TOKEN':'long-term-secret'}),patch('social.urlopen',return_value=BytesIO(json.dumps(temporary).encode())) as fetch:
+            issued=self.call(1,'GET','/api/calls/ice-config')
+        self.assertTrue(issued['relayConfigured'])
+        self.assertEqual(issued['iceServers'],temporary['iceServers'])
+        self.assertNotIn('long-term-secret',json.dumps(issued))
+        request=fetch.call_args.args[0]
+        self.assertEqual(request.get_header('Authorization'),'Bearer long-term-secret')
+        self.assertEqual(json.loads(request.data),{'ttl':86400})
+
+        with patch.dict(os.environ,{'GOLDCHAT_TURN_KEY_ID':'sample-key-id','GOLDCHAT_TURN_API_TOKEN':'long-term-secret'}),patch('social.urlopen',return_value=BytesIO(b'{}')):
+            response=self.client.get('/api/calls/ice-config',headers={'Authorization':'Bearer '+self.tokens[1]})
+        self.assertEqual(response.status_code,503)
 
     @contextmanager
     def owner(self):
